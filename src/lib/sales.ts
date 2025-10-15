@@ -12,7 +12,6 @@ import {
   query,
   where,
   orderBy,
-  updateDoc,
   getDocs,
 } from "firebase/firestore";
 import dayjs from "dayjs";
