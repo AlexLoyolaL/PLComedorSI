@@ -1,0 +1,99 @@
+/* Fuente del sistema + variables de color */
+:root{
+  --bg: #0b1020;
+  --panel: #111830;
+  --panel-2: #0e162b;
+  --text: #e8edf8;
+  --muted: #9aa4c0;
+  --brand: #4f8cff;
+  --brand-2:#3a6fe6;
+  --border: #202a45;
+  --ok:#22c55e;
+  --warn:#f59e0b;
+  --danger:#ef4444;
+  --shadow: 0 10px 30px rgba(3,8,20,.25), 0 2px 6px rgba(3,8,20,.25);
+}
+
+*{ box-sizing: border-box }
+html,body,#root{ height:100% }
+body{
+  margin:0;
+  background: radial-gradient(1200px 600px at 10% -10%, #1a2450 15%, transparent 30%) no-repeat,
+              radial-gradient(900px 500px at 110% -20%, #0f1738 10%, transparent 35%) no-repeat,
+              var(--bg);
+  color:var(--text);
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+/* Botones */
+.button{
+  appearance:none; border:1px solid var(--border);
+  background:linear-gradient(180deg, var(--brand), var(--brand-2));
+  color:white; font-weight:600; letter-spacing:.3px;
+  padding:10px 16px; border-radius:12px; cursor:pointer;
+  box-shadow: var(--shadow); transition: transform .08s ease, filter .2s ease;
+}
+.button:hover{ filter:brightness(1.05) }
+.button:active{ transform: translateY(1px) }
+.button.outline{
+  background: transparent; color: var(--text);
+  border-color: #2a375f;
+}
+.button.ghost{
+  background: #0f1530; border-color:#1c2546; color:#c7d2fe;
+}
+
+/* Inputs */
+.input, textarea{
+  width:100%; background:#0f1530; border:1px solid #1c2546; color:var(--text);
+  padding:10px 12px; border-radius:12px; outline:none;
+}
+.input:focus, textarea:focus{ border-color:#3756b6; box-shadow: 0 0 0 3px rgba(79,140,255,.25) }
+
+/* Layouts */
+.center{
+  min-height:100%; display:grid; place-items:center; padding:32px;
+}
+.card{
+  width: min(420px, 92vw); background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border:1px solid var(--border); border-radius:18px; padding:22px; box-shadow: var(--shadow);
+}
+.card h1{ margin:0 0 8px 0; font-size:22px }
+.card p{ margin:4px 0 16px 0; color:var(--muted) }
+
+/* App chrome */
+.appbar{
+  position:sticky; top:0; z-index:10;
+  display:flex; align-items:center; gap:8px;
+  padding:10px 12px; border-bottom:1px solid var(--border);
+  background: rgba(11,16,32,.7); backdrop-filter: blur(8px);
+}
+.brand{
+  display:flex; align-items:center; gap:8px; font-weight:700; letter-spacing:.4px;
+}
+.tab{
+  border:none; background:transparent; color:var(--muted);
+  padding:8px 12px; border-radius:10px; cursor:pointer; font-weight:600;
+}
+.tab.active{ color:white; background:#19223f; border:1px solid #243056 }
+.fill{ flex:1 }
+.badge{
+  display:inline-flex; align-items:center; gap:6px;
+  border:1px solid #223058; color:#cbd5ff;
+  padding:6px 10px; border-radius:999px; background:#0f1733;
+}
+
+/* Cards reutilizables */
+.panel{
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border:1px solid var(--border); border-radius:16px; padding:14px;
+}
+.panel .title{ font-weight:700; margin:0 0 10px 0 }
+.grid{ display:grid; gap:14px }
+.grid.cols-2{ grid-template-columns: repeat(2, minmax(0,1fr)) }
+.grid.cols-3{ grid-template-columns: repeat(3, minmax(0,1fr)) }
+
+/* Tabla simple */
+.table{ width:100%; border-collapse: collapse; }
+.table th,.table td{ padding:10px 8px; border-bottom:1px solid #1b2544 }
+.table th{ text-align:left; color:#aab4d6; font-weight:600 }
