@@ -1,9 +1,11 @@
 import { useEffect, useRef } from "react";
-import { BrowserMultiFormatReader, IScannerControls, Result } from "@zxing/browser";
+import { BrowserMultiFormatReader } from "@zxing/browser";
+import type { IScannerControls } from "@zxing/browser";
+import type { Result } from "@zxing/library";
 
 type Props = {
-  deviceId?: string | null;         // puede venir null
-  onResult: (text: string) => void; // callback con el texto del QR
+  deviceId?: string | null;
+  onResult: (text: string) => void;
   onError?: (err: unknown) => void;
   className?: string;
 };
@@ -18,15 +20,12 @@ export default function QRReader({ deviceId, onResult, onError, className }: Pro
 
     async function start() {
       try {
-        // Si deviceId es null, pasamos undefined
-        const devId = deviceId || undefined;
-
+        const devId = deviceId || undefined; // null -> undefined
         controlsRef.current = await readerRef.current!.decodeFromVideoDevice(
           devId,
           videoRef.current!,
           (result: Result | undefined, err) => {
             if (result) onResult(result.getText());
-            // errores de decodificación por frame se ignoran
             else if (err && onError) onError(err);
           }
         );
@@ -38,11 +37,9 @@ export default function QRReader({ deviceId, onResult, onError, className }: Pro
     if (videoRef.current) start();
 
     return () => {
-      // Detener de forma correcta
-      controlsRef.current?.stop();
+      controlsRef.current?.stop(); // detener correctamente
       controlsRef.current = null;
     };
-    // Reiniciar si cambia la cámara
   }, [deviceId, onResult, onError]);
 
   return <video ref={videoRef} className={className} muted playsInline />;

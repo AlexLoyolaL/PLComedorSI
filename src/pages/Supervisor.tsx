@@ -169,25 +169,6 @@ export default function Supervisor() {
         {/* Gráficos */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
           {/* Barras por día */}
-          <div className="panel">
-            <div style={{ fontWeight: 700, marginBottom: 8, color: "#fff" }}>Ventas diarias</div>
-            <div style={{ height: 260 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={dailyData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,.2)" />
-                  <XAxis dataKey="date" tick={{ fill: "#fff" }} />
-                  <YAxis allowDecimals={false} tick={{ fill: "#fff" }} />
-                  <Tooltip
-                    contentStyle={{ background: "rgba(20,24,36,.95)", border: "1px solid #334", color: "#fff" }}
-                    labelStyle={{ color: "#fff" }}
-                    itemStyle={{ color: "#fff" }}
-                  />
-                  <Bar dataKey="total" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
           {/* Torta MENU vs VEGGIE con colores solicitados */}
           <div className="panel">
             <div style={{ fontWeight: 700, marginBottom: 8, color: "#fff" }}>MENU vs VEGGIE</div>
@@ -207,19 +188,27 @@ export default function Supervisor() {
                     innerRadius={50}
                     outerRadius={90}
                     labelLine={false}
-                    // Etiqueta en BLANCO: "MENU: 12", "VEGGIE: 5"
-                    label={({ cx, cy, midAngle, innerRadius, outerRadius, name, value }) => {
+                    // TIPADO Y DEFAULTS PARA EVITAR TS18046/TS18048
+                    label={({
+                      cx = 0,
+                      cy = 0,
+                      midAngle = 0,
+                      innerRadius = 0,
+                      outerRadius = 0,
+                      name,
+                      value,
+                    }: any) => {
                       const RAD = Math.PI / 180;
-                      const r = innerRadius + (outerRadius - innerRadius) * 0.62;
-                      const x = cx + r * Math.cos(-midAngle * RAD);
-                      const y = cy + r * Math.sin(-midAngle * RAD);
+                      const r = Number(innerRadius) + (Number(outerRadius) - Number(innerRadius)) * 0.62;
+                      const x = Number(cx) + r * Math.cos(-Number(midAngle) * RAD);
+                      const y = Number(cy) + r * Math.sin(-Number(midAngle) * RAD);
                       return (
                         <text
                           x={x}
                           y={y}
                           fill="#fff"
                           fontSize={12}
-                          textAnchor={x > cx ? "start" : "end"}
+                          textAnchor={x > Number(cx) ? "start" : "end"}
                           dominantBaseline="central"
                         >
                           {`${name}: ${value}`}
@@ -230,7 +219,7 @@ export default function Supervisor() {
                     {pieData.map((entry, i) => (
                       <Cell
                         key={`slice-${i}`}
-                        fill={entry.name === "VEGGIE" ? "#1ebb72ff" : "#ffffff"}
+                        fill={entry.name === "VEGGIE" ? "#235a40" : "#ffffff"}
                         stroke="rgba(255,255,255,.15)"
                       />
                     ))}
@@ -239,6 +228,7 @@ export default function Supervisor() {
               </ResponsiveContainer>
             </div>
           </div>
+
         </div>
 
         {/* Tabla */}
