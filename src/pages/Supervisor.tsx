@@ -20,7 +20,7 @@ type Row = {
   voided?: boolean;
 };
 
-// helpers de fecha (inputs HTML usan TZ local)
+// helpers fecha
 function addDays(date: Date, delta: number) {
   const d = new Date(date);
   d.setDate(d.getDate() + delta);
@@ -32,36 +32,31 @@ function toDateInputValue(date: Date) {
 }
 
 export default function Supervisor() {
-  // rango por defecto: últimos 7 días [hoy-6, hoy]
+  // últimos 7 días
   const endDefault = new Date();
   const startDefault = addDays(endDefault, -6);
 
-  const [start, setStart] = useState<string>(toDateInputValue(startDefault)); // YYYY-MM-DD
-  const [end, setEnd] = useState<string>(toDateInputValue(endDefault));       // YYYY-MM-DD
+  const [start, setStart] = useState<string>(toDateInputValue(startDefault));
+  const [end, setEnd] = useState<string>(toDateInputValue(endDefault));
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>("");
 
-  // fetch por rango (dateKey BETWEEN)
   useEffect(() => {
     async function fetchRange() {
       try {
         setLoading(true);
         setErr("");
-
-        // Firestore necesita orderBy("dateKey") si usás >= y <= sobre dateKey
         const qRef = query(
           collection(db, "sales"),
           where("dateKey", ">=", start),
           where("dateKey", "<=", end),
           orderBy("dateKey")
         );
-
         const snap = await getDocs(qRef);
         const list: Row[] = [];
         snap.forEach((d) => list.push({ id: d.id, ...(d.data() as any) }));
-
-        // ordenar para la tabla: fecha desc, hora desc
+        // tabla: fecha desc, hora desc
         list.sort((a, b) => {
           if (a.dateKey < b.dateKey) return 1;
           if (a.dateKey > b.dateKey) return -1;
@@ -69,7 +64,6 @@ export default function Supervisor() {
           const tb = b.ts?.toDate ? b.ts.toDate().getTime() : 0;
           return tb - ta;
         });
-
         setRows(list);
       } catch (e: any) {
         setErr(e?.message || String(e));
@@ -80,31 +74,27 @@ export default function Supervisor() {
     if (start && end && start <= end) fetchRange();
   }, [start, end]);
 
-  // agregados para gráficos
+  // agregados (daily + pie)
   const { dailyData, pieData } = useMemo(() => {
     const dailyMap = new Map<string, number>();
     let menu = 0, veggie = 0;
-
     for (const r of rows) {
       if (r.voided) continue;
       dailyMap.set(r.dateKey, (dailyMap.get(r.dateKey) ?? 0) + 1);
       if (r.itemType === "MENU") menu++;
       else if (r.itemType === "VEGGIE") veggie++;
     }
-
     const dailyData = Array.from(dailyMap.entries())
       .sort((a, b) => (a[0] < b[0] ? -1 : 1))
       .map(([date, total]) => ({ date, total }));
-
     const pieData = [
       { name: "MENU", value: menu },
       { name: "VEGGIE", value: veggie },
     ];
-
     return { dailyData, pieData };
   }, [rows]);
 
-  // CSV (excluye anuladas)
+  // CSV
   const csv = useMemo(() => {
     const header = ["fecha", "hora", "vendedor", "socio", "tipo", "destino", "mesa"];
     const lines = rows
@@ -168,8 +158,27 @@ export default function Supervisor() {
 
         {/* Gráficos */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
-          {/* Barras por día */}
-          {/* Torta MENU vs VEGGIE con colores solicitados */}
+          {/* Barras por día (usa dailyData) */}
+          <div className="panel">
+            <div style={{ fontWeight: 700, marginBottom: 8, color: "#fff" }}>Ventas diarias</div>
+            <div style={{ height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={dailyData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,.2)" />
+                  <XAxis dataKey="date" tick={{ fill: "#fff" }} />
+                  <YAxis allowDecimals={false} tick={{ fill: "#fff" }} />
+                  <Tooltip
+                    contentStyle={{ background: "rgba(20,24,36,.95)", border: "1px solid #334", color: "#fff" }}
+                    labelStyle={{ color: "#fff" }}
+                    itemStyle={{ color: "#fff" }}
+                  />
+                  <Bar dataKey="total" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Pie MENU vs VEGGIE con colores solicitados */}
           <div className="panel">
             <div style={{ fontWeight: 700, marginBottom: 8, color: "#fff" }}>MENU vs VEGGIE</div>
             <div style={{ height: 260 }}>
@@ -188,7 +197,6 @@ export default function Supervisor() {
                     innerRadius={50}
                     outerRadius={90}
                     labelLine={false}
-                    // TIPADO Y DEFAULTS PARA EVITAR TS18046/TS18048
                     label={({
                       cx = 0,
                       cy = 0,
@@ -228,7 +236,6 @@ export default function Supervisor() {
               </ResponsiveContainer>
             </div>
           </div>
-
         </div>
 
         {/* Tabla */}
