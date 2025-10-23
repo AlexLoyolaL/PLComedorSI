@@ -313,3 +313,76 @@ export function listenSalesByDate(dateKey: string, setter: (rows:any[])=>void) {
     setter(rows as any[]);
   });
 }
+// --- Carga manual de VIANDAS por Admin ---
+
+
+export type ViandaConcept = "PERSONAL" | "DESAYUNO" | "CENTRO_JUBILADOS";
+
+type AddManualViandasParams = {
+  qty: number;
+  concept: ViandaConcept;
+  seller: { uid: string; email?: string; name?: string };
+};
+
+export async function addManualViandas(params: AddManualViandasParams) {
+  const { qty, concept, seller } = params;
+  if (!Number.isFinite(qty) || qty <= 0) throw new Error("Cantidad inválida");
+
+  const key = todayKey();
+  const aggRef = doc(db, "dayAgg", key);
+  const logRef = doc(collection(db, "adminAdds")); // log auditable
+
+  await runTransaction(db, async (tx) => {
+    // asegurar doc agregado
+    const snap = await tx.get(aggRef);
+    if (!snap.exists()) {
+      tx.set(
+        aggRef,
+        {
+          comedor: { MENU: 0, VEGGIE: 0, byTable: {} },
+          vianda: { MENU: 0, VEGGIE: 0 },
+          extra: { vianda: { total: 0, breakdown: {} } },
+          lastUpdated: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+
+    // actualizar totales (manual = vianda MENU por ahora)
+    tx.update(aggRef, {
+      "vianda.MENU": increment(qty),
+      "extra.vianda.total": increment(qty),
+      [`extra.vianda.breakdown.${concept}`]: increment(qty),
+      lastUpdated: serverTimestamp(),
+    });
+
+    // log de auditoría
+    tx.set(logRef, {
+      dateKey: key,
+      qty,
+      concept,
+      type: "VIANDA_MANUAL",
+      ts: serverTimestamp(),
+      seller,
+    });
+
+    // NUEVO: reflejar en `sales` para que Supervisor lo vea
+    // un doc por vianda (Supervisor agrega por cantidad de documentos)
+    for (let i = 0; i < qty; i++) {
+      const saleRef = doc(db, "sales", crypto.randomUUID());
+      tx.set(saleRef, {
+        dateKey: key,
+        ts: serverTimestamp(),
+        seller: { uid: seller.uid, email: seller.email ?? "", name: seller.name ?? "" },
+        member: { id: "" }, // sin socio
+        itemType: "MENU",   // si luego querés Veggie, mapeamos según 'concept'
+        destination: { mode: "VIANDA", table: null },
+        allowDouble: true,
+        voided: false,
+        voidReason: null,
+        voidedBy: null,
+      });
+    }
+  });
+}
+
