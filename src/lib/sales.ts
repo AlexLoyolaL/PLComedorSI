@@ -25,6 +25,19 @@ dayjs.extend(timezone);
 
 const TZ = "America/Argentina/Buenos_Aires";
 
+
+// Capacidad por mesa
+export function tableCapacityFromKey(key: string): number {
+  const n = parseInt(String(key).replace(/[^\d]/g, ""), 10);
+  if (!Number.isFinite(n)) return 9; // default por las dudas
+
+  if (n >= 24 && n <= 34) {
+    return 8; // Anexo
+  }
+  return 9;   // resto de mesas
+}
+
+
 /** Clave de día (TZ AR) */
 export const todayKey = () => dayjs().tz(TZ).format("YYYY-MM-DD");
 export const keyFromDate = (d: Date) => dayjs(d).tz(TZ).format("YYYY-MM-DD");
@@ -45,19 +58,61 @@ export function tableLabelFromKey(key: string) {
 // ---------- SETUP DEL DÍA ----------
 export async function ensureDaySettings() {
   const key = todayKey();
-  const ref = doc(db, "settings_day", key); // colección plana por fecha
+  const ref = doc(db, "settings_day", key);
   const snap = await getDoc(ref);
-  if (snap.exists()) return;
 
+  if (snap.exists()) {
+    const data = snap.data() as any;
+    const patch: any = {};
+
+    if (!data.cutoffs) {
+      patch.cutoffs = { comedor: "20:00", vianda: "20:00" };
+    }
+
+    if (!data.limits) {
+      patch.limits = {
+        MENU: null,
+        VEGGIE: null,
+        CELIACO: null,
+      };
+    } else if (data.limits && data.limits.CELIACO === undefined) {
+      patch.limits = {
+        ...data.limits,
+        CELIACO: null,
+      };
+    }
+
+    if (Object.keys(patch).length > 0) {
+      await setDoc(ref, patch, { merge: true });
+    }
+    return;
+  }
+
+  // Si no existe, lo crea desde cero
   const tables: Record<string, number> = {};
-  for (let i = 1; i <= 23; i++) tables[`MESA ${String(i).padStart(2, "0")}`] = 9;
+
+// Mesas 1–23 → 9 lugares
+  for (let i = 1; i <= 23; i++) {
+    tables[`MESA ${String(i).padStart(2, "0")}`] = 9;
+  }
+
+  // Mesas 24–34 → 8 lugares
+  for (let i = 24; i <= 34; i++) {
+    tables[`MESA ${String(i).padStart(2, "0")}`] = 8;
+  }
 
   await setDoc(ref, {
-    cutoffs: { comedor: "20:00", vianda: "20:00" },
+    cutoffs: { comedor: "23:00", vianda: "23:00" },
     tables,
+    limits: {
+      MENU: null,
+      VEGGIE: null,
+      CELIACO: null,
+    },
     createdAt: serverTimestamp(),
   });
 }
+
 
 function afterCutoff(mode: "COMEDOR" | "VIANDA", settings: any) {
   const now = dayjs().tz(TZ);
@@ -93,9 +148,14 @@ export async function createSaleTx(params: {
 
     // 3) Validaciones de mesa/tipo
     if (params.dest.mode === "COMEDOR") {
-      if (!params.dest.table) throw new Error("Mesa obligatoria en COMEDOR");
+      if (!params.dest.table) {
+        throw new Error("Mesa obligatoria en COMEDOR");
+      }
+
       if (!mesaOk(params.itemType, params.dest.table)) {
-        throw new Error("La mesa no corresponde al tipo (01–21 MENU, 22–23 VEGGIE).");
+        throw new Error(
+          "La mesa no corresponde al tipo: MENU/CELIACO → mesas 01–19 y 24–34; VEGGIE → mesas 20–23."
+        );
       }
     }
 
@@ -108,18 +168,58 @@ export async function createSaleTx(params: {
 
     // 5) Asegurar doc base de agregados y LEERLO para usar valores actuales
     const aggSnap = await tx.get(aggRef);
-    const baseAgg = aggSnap.exists()
-      ? (aggSnap.data() as any)
-      : { comedor: { MENU: 0, VEGGIE: 0, byTable: {} as Record<string, number> }, vianda: { MENU: 0, VEGGIE: 0 } };
 
-    // 👇 NUEVO: si no existe, crearlo antes de cualquier tx.update
-    if (!aggSnap.exists()) {
-      tx.set(aggRef, {
-        comedor: { MENU: 0, VEGGIE: 0, byTable: {} },
-        vianda:  { MENU: 0, VEGGIE: 0 },
-        lastUpdated: serverTimestamp(),
-      }, { merge: true });
+    let baseAgg: {
+      comedor: { MENU: number; VEGGIE: number; CELIACO: number; byTable: Record<string, number> };
+      vianda: { MENU: number; VEGGIE: number; CELIACO: number };
+    };
+
+    if (aggSnap.exists()) {
+      baseAgg = aggSnap.data() as any;
+    } else {
+      baseAgg = {
+        comedor: { MENU: 0, VEGGIE: 0, CELIACO: 0, byTable: {} },
+        vianda:  { MENU: 0, VEGGIE: 0, CELIACO: 0 },
+      };
+
+      // crear el documento base para que luego los tx.update no fallen
+      tx.set(aggRef, baseAgg);
     }
+
+
+    // 🔹 Agregar acá el control de límite diario
+    // Límite diario por tipo (se configura en settings_day.limits)
+    const limits = (settings.limits ?? {}) as {
+      MENU?: number | null;
+      VEGGIE?: number | null;
+      CELIACO?: number | null;
+    };
+
+    // Totales vendidos por tipo (comedor + vianda) ANTES de esta venta
+    const totalByType: Record<string, number> = {
+      MENU:
+        (baseAgg.comedor?.MENU ?? 0) +
+        (baseAgg.vianda?.MENU ?? 0),
+      VEGGIE:
+        (baseAgg.comedor?.VEGGIE ?? 0) +
+        (baseAgg.vianda?.VEGGIE ?? 0),
+      CELIACO:
+        (baseAgg.comedor?.CELIACO ?? 0) +
+        (baseAgg.vianda?.CELIACO ?? 0),
+    };
+
+    const currentType = params.itemType as ItemType;
+    const limit = limits[currentType];
+
+    if (typeof limit === "number" && limit >= 0) {
+      if (totalByType[currentType] >= limit) {
+        throw new Error(
+          `Límite diario alcanzado para ${currentType}. No se pueden vender más unidades hoy.`
+        );
+      }
+    }
+
+
 
     // 6) Capacidad por mesa con clave normalizada
     if (params.dest.mode === "COMEDOR") {
@@ -128,9 +228,15 @@ export async function createSaleTx(params: {
         (baseAgg?.comedor?.byTable?.[mesaK] ??
           baseAgg?.comedor?.byTable?.[params.dest.table!] ??
           0) as number;
-      if (ocupados >= 9) throw new Error(`Capacidad completa en ${tableLabelFromKey(mesaK)} (9).`);
-    }
 
+      const capacidad = tableCapacityFromKey(mesaK);
+
+      if (ocupados >= capacidad) {
+        throw new Error(
+          `Capacidad completa en ${tableLabelFromKey(mesaK)} (${capacidad}).`
+        );
+      }
+    }
     // 7) Alta de venta
     const saleRef = doc(db, "sales", crypto.randomUUID());
     tx.set(saleRef, {
@@ -278,28 +384,45 @@ export async function rebuildTodayAggFromSales() {
   const snap = await getDocs(q);
 
   const agg = {
-    comedor: { MENU: 0, VEGGIE: 0, byTable: {} as Record<string, number> },
-    vianda: { MENU: 0, VEGGIE: 0 },
+    comedor: {
+      MENU: 0,
+      VEGGIE: 0,
+      CELIACO: 0,
+      byTable: {} as Record<string, number>,
+    },
+    vianda: {
+      MENU: 0,
+      VEGGIE: 0,
+      CELIACO: 0,
+    },
   };
 
   snap.forEach((d) => {
     const r: any = d.data();
     if (r.voided) return;
 
-    const type = r.itemType as "MENU" | "VEGGIE";
+    const type = r.itemType as ItemType; // ahora usa ItemType completo
     const mode = r.destination?.mode as "COMEDOR" | "VIANDA" | undefined;
 
+    if (!type || !mode) return;
+
     if (mode === "COMEDOR") {
-      agg.comedor[type] += 1;
+      // sumo por tipo (incluye CELIACO)
+      agg.comedor[type] = (agg.comedor[type] ?? 0) + 1;
+
       const key = tableKey(r.destination?.table);
-      if (key) agg.comedor.byTable[key] = (agg.comedor.byTable[key] ?? 0) + 1;
+      if (key) {
+        agg.comedor.byTable[key] =
+          (agg.comedor.byTable[key] ?? 0) + 1;
+      }
     } else if (mode === "VIANDA") {
-      agg.vianda[type] += 1;
+      agg.vianda[type] = (agg.vianda[type] ?? 0) + 1;
     }
   });
 
   await setDoc(doc(db, "dayAgg", key), agg, { merge: false });
 }
+
 // ---------- Permite filtrar por fecha ----------
 
 export function listenSalesByDate(dateKey: string, setter: (rows:any[])=>void) {
@@ -315,32 +438,37 @@ export function listenSalesByDate(dateKey: string, setter: (rows:any[])=>void) {
 }
 // --- Carga manual de VIANDAS por Admin ---
 
-
-export type ViandaConcept = "PERSONAL" | "DESAYUNO" | "CENTRO_JUBILADOS";
+export type ViandaConcept =
+  | "PERSONAL"
+  | "DESAYUNO"
+  | "CENTRO_JUBILADOS"
+  | "EVENTOS"
+  | "VIANDA_CONGELADA";
 
 type AddManualViandasParams = {
   qty: number;
   concept: ViandaConcept;
+  itemType: ItemType;     // <- importante
+  note?: string;          // <- importante
   seller: { uid: string; email?: string; name?: string };
 };
 
 export async function addManualViandas(params: AddManualViandasParams) {
-  const { qty, concept, seller } = params;
+  const { qty, concept, itemType, note, seller } = params;
   if (!Number.isFinite(qty) || qty <= 0) throw new Error("Cantidad inválida");
 
   const key = todayKey();
   const aggRef = doc(db, "dayAgg", key);
-  const logRef = doc(collection(db, "adminAdds")); // log auditable
+  const logRef = doc(collection(db, "adminAdds"));
 
   await runTransaction(db, async (tx) => {
-    // asegurar doc agregado
     const snap = await tx.get(aggRef);
     if (!snap.exists()) {
       tx.set(
         aggRef,
         {
-          comedor: { MENU: 0, VEGGIE: 0, byTable: {} },
-          vianda: { MENU: 0, VEGGIE: 0 },
+          comedor: { MENU: 0, VEGGIE: 0, CELIACO: 0, byTable: {} },
+          vianda: { MENU: 0, VEGGIE: 0, CELIACO: 0 },
           extra: { vianda: { total: 0, breakdown: {} } },
           lastUpdated: serverTimestamp(),
         },
@@ -348,41 +476,52 @@ export async function addManualViandas(params: AddManualViandasParams) {
       );
     }
 
-    // actualizar totales (manual = vianda MENU por ahora)
+    // actualizar totales
     tx.update(aggRef, {
-      "vianda.MENU": increment(qty),
+      [`vianda.${itemType}`]: increment(qty),
       "extra.vianda.total": increment(qty),
       [`extra.vianda.breakdown.${concept}`]: increment(qty),
       lastUpdated: serverTimestamp(),
     });
 
-    // log de auditoría
+    // log en adminAdds
     tx.set(logRef, {
       dateKey: key,
       qty,
       concept,
+      itemType,
+      note: note ?? "",
       type: "VIANDA_MANUAL",
       ts: serverTimestamp(),
-      seller,
+      seller: {
+        uid: seller.uid,
+        email: seller.email ?? "",
+        name: seller.name ?? "",
+      },
     });
 
-    // NUEVO: reflejar en `sales` para que Supervisor lo vea
-    // un doc por vianda (Supervisor agrega por cantidad de documentos)
+    // reflejo en sales (para Supervisor / export)
     for (let i = 0; i < qty; i++) {
-      const saleRef = doc(db, "sales", crypto.randomUUID());
+      const saleRef = doc(collection(db, "sales"));
       tx.set(saleRef, {
         dateKey: key,
         ts: serverTimestamp(),
-        seller: { uid: seller.uid, email: seller.email ?? "", name: seller.name ?? "" },
-        member: { id: "" }, // sin socio
-        itemType: "MENU",   // si luego querés Veggie, mapeamos según 'concept'
+        seller: {
+          uid: seller.uid,
+          email: seller.email ?? "",
+          name: seller.name ?? "",
+        },
+        member: { id: "" },
+        itemType,
         destination: { mode: "VIANDA", table: null },
         allowDouble: true,
         voided: false,
         voidReason: null,
         voidedBy: null,
+        manual: true,
+        manualConcept: concept,
+        manualNote: note ?? "",
       });
     }
   });
 }
-

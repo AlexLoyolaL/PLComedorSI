@@ -8,6 +8,8 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
   PieChart, Pie, Cell, Legend,
 } from "recharts";
+import * as XLSX from "xlsx";
+
 
 type Row = {
   id: string;
@@ -15,9 +17,12 @@ type Row = {
   ts: any; // Firestore Timestamp
   seller: { email?: string };
   member: { id?: string };
-  itemType: "MENU" | "VEGGIE";
+  itemType: "MENU" | "VEGGIE" | "CELIACO";
   destination: { mode: "COMEDOR" | "VIANDA"; table?: string | null };
   voided?: boolean;
+  manual?: boolean;
+  manualConcept?: string;
+  manualNote?: string;   // <-- importante
 };
 
 // helpers fecha
@@ -77,12 +82,13 @@ export default function Supervisor() {
   // agregados (daily + pie)
   const { dailyData, pieData } = useMemo(() => {
     const dailyMap = new Map<string, number>();
-    let menu = 0, veggie = 0;
+    let menu = 0, veggie = 0, celiaco = 0;
     for (const r of rows) {
       if (r.voided) continue;
       dailyMap.set(r.dateKey, (dailyMap.get(r.dateKey) ?? 0) + 1);
       if (r.itemType === "MENU") menu++;
-      else if (r.itemType === "VEGGIE") veggie++;
+     else if (r.itemType === "VEGGIE") veggie++;
+     else if (r.itemType === "CELIACO") celiaco++;
     }
     const dailyData = Array.from(dailyMap.entries())
       .sort((a, b) => (a[0] < b[0] ? -1 : 1))
@@ -90,13 +96,23 @@ export default function Supervisor() {
     const pieData = [
       { name: "MENU", value: menu },
       { name: "VEGGIE", value: veggie },
+      { name: "CELIACO", value: celiaco },
     ];
     return { dailyData, pieData };
   }, [rows]);
 
   // CSV
   const csv = useMemo(() => {
-    const header = ["fecha", "hora", "vendedor", "socio", "tipo", "destino", "mesa"];
+    const header = [
+      "fecha",
+      "hora",
+      "vendedor",
+      "socio",
+      "tipo",
+      "destino",
+      "mesa",
+      "observaciones",
+    ];
     const lines = rows
       .filter((r) => !r.voided)
       .map((r) => [
@@ -107,7 +123,9 @@ export default function Supervisor() {
         r.itemType,
         r.destination?.mode ?? "",
         r.destination?.table ?? "",
+        r.manualNote ?? "",        // <-- nueva columna
       ]);
+
     return [header, ...lines].map((a) => a.join(",")).join("\n");
   }, [rows]);
 
@@ -118,6 +136,89 @@ export default function Supervisor() {
     a.href = url; a.download = `ventas_${start}_a_${end}.csv`; a.click();
     URL.revokeObjectURL(url);
   }
+
+  async function exportXLSX() {
+    if (!rows || rows.length === 0) {
+      // igual vamos a exportar las cargas manuales aunque no haya ventas,
+      // pero si querés podés eliminar este early return
+      // return;
+    }
+
+    // Hoja 1: Ventas (igual que antes)
+    const data = rows
+      .filter((r) => !r.voided)
+      .map((r) => ({
+        Fecha: r.dateKey ?? "",
+        Hora: r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : "",
+        Vendedor: r.seller?.email ?? "",
+        Socio: r.member?.id ?? "",
+        Tipo: r.itemType ?? "",
+        Destino: r.destination?.mode ?? "",
+        Mesa: r.destination?.table ?? "",
+        Observaciones: r.manualNote ?? "",   // <-- acá va la nota
+      }));
+
+
+
+    const wsVentas = XLSX.utils.json_to_sheet(data);
+    wsVentas["!cols"] = [
+  { wch: 12 }, // Fecha
+  { wch: 10 }, // Hora
+  { wch: 25 }, // Vendedor
+  { wch: 20 }, // Socio
+  { wch: 10 }, // Tipo
+  { wch: 10 }, // Destino
+  { wch: 10 }, // Mesa
+  { wch: 30 }, // Observaciones
+];
+
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, wsVentas, "Ventas");
+
+    // Hoja 2: Cargas manuales (adminAdds)
+    try {
+      const adminQ = query(
+        collection(db, "adminAdds"),
+        where("key", ">=", start),
+        where("key", "<=", end),
+        orderBy("key")
+      );
+      const adminSnap = await getDocs(adminQ);
+      const manualDocs = adminSnap.docs.map((d) => d.data() as any);
+
+      if (manualDocs.length > 0) {
+        const manualData = manualDocs.map((r: any) => ({
+          Fecha: r.key ?? "",
+          Hora: r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : "",
+          Usuario: r.seller?.email ?? "",
+          Cantidad: r.qty ?? 0,
+          Tipo: r.itemType ?? "",
+          Concepto: (r.concept ?? "").toString().replace("_", " "),
+          Reporte: r.note ?? "",
+        }));
+
+        const wsManual = XLSX.utils.json_to_sheet(manualData);
+        wsManual["!cols"] = [
+          { wch: 12 }, // Fecha
+          { wch: 10 }, // Hora
+          { wch: 25 }, // Usuario
+          { wch: 10 }, // Cantidad
+          { wch: 10 }, // Tipo
+          { wch: 20 }, // Concepto
+          { wch: 40 }, // Reporte
+        ];
+
+        XLSX.utils.book_append_sheet(wb, wsManual, "Cargas manuales");
+      }
+    } catch (e) {
+      console.error("Error cargando adminAdds para XLSX", e);
+    }
+
+    const filename = `ventas_${start}_a_${end}.xlsx`;
+    XLSX.writeFile(wb, filename);
+  }
+
 
   const rangeInvalid = start > end;
 
@@ -145,6 +246,10 @@ export default function Supervisor() {
           <button className="button" onClick={downloadCsv} disabled={rangeInvalid || rows.length === 0}>
             Exportar CSV
           </button>
+          <button className="button" onClick={exportXLSX} disabled={rangeInvalid || rows.length === 0}>
+            Exportar XLSX
+          </button>
+          
           <div style={{ marginLeft: "auto", color: "var(--muted)" }}>
             {loading ? "Cargando..." : `${rows.filter(r=>!r.voided).length} ventas`}
           </div>
@@ -178,14 +283,54 @@ export default function Supervisor() {
             </div>
           </div>
 
-          {/* Pie MENU vs VEGGIE con colores solicitados */}
+          {/* Gráfico y cuadro de Ventas */}
           <div className="panel">
-            <div style={{ fontWeight: 700, marginBottom: 8, color: "#fff" }}>MENU vs VEGGIE</div>
+            <div style={{ fontWeight: 700, marginBottom: 8, color: "#fff" }}>Ventas</div>
+
+            {/* Cuadro compacto con totales */}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: 14,
+                fontWeight: 600,
+                textAlign: "center",
+                padding: "4px 8px",
+                color: "#fff",
+                marginBottom: 8,
+              }}
+            >
+              <div style={{ flex: 1, textAlign: "left" }}>
+                MENU:&nbsp;
+                <span style={{ fontWeight: 400 }}>
+                  {pieData.find((p) => p.name === "MENU")?.value ?? 0}
+                </span>
+              </div>
+              <div style={{ flex: 1, textAlign: "center" }}>
+                VEGGIE:&nbsp;
+                <span style={{ fontWeight: 400 }}>
+                  {pieData.find((p) => p.name === "VEGGIE")?.value ?? 0}
+                </span>
+              </div>
+              <div style={{ flex: 1, textAlign: "right" }}>
+                CELIACO:&nbsp;
+                <span style={{ fontWeight: 400 }}>
+                  {pieData.find((p) => p.name === "CELIACO")?.value ?? 0}
+                </span>
+              </div>
+            </div>
+
+            {/* Gráfico de torta con los tres tipos */}
             <div style={{ height: 260 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Tooltip
-                    contentStyle={{ background: "rgba(20,24,36,.95)", border: "1px solid #334", color: "#fff" }}
+                    contentStyle={{
+                      background: "rgba(20,24,36,.95)",
+                      border: "1px solid #334",
+                      color: "#fff",
+                    }}
                     labelStyle={{ color: "#fff" }}
                     itemStyle={{ color: "#fff" }}
                   />
@@ -197,37 +342,17 @@ export default function Supervisor() {
                     innerRadius={50}
                     outerRadius={90}
                     labelLine={false}
-                    label={({
-                      cx = 0,
-                      cy = 0,
-                      midAngle = 0,
-                      innerRadius = 0,
-                      outerRadius = 0,
-                      name,
-                      value,
-                    }: any) => {
-                      const RAD = Math.PI / 180;
-                      const r = Number(innerRadius) + (Number(outerRadius) - Number(innerRadius)) * 0.62;
-                      const x = Number(cx) + r * Math.cos(-Number(midAngle) * RAD);
-                      const y = Number(cy) + r * Math.sin(-Number(midAngle) * RAD);
-                      return (
-                        <text
-                          x={x}
-                          y={y}
-                          fill="#fff"
-                          fontSize={12}
-                          textAnchor={x > Number(cx) ? "start" : "end"}
-                          dominantBaseline="central"
-                        >
-                          {`${name}: ${value}`}
-                        </text>
-                      );
-                    }}
-                  >
+                  >  
                     {pieData.map((entry, i) => (
                       <Cell
                         key={`slice-${i}`}
-                        fill={entry.name === "VEGGIE" ? "#235a40" : "#ffffff"}
+                        fill={
+                          entry.name === "MENU"
+                            ? "#00b0ff"
+                            : entry.name === "VEGGIE"
+                            ? "#00ff84"
+                            : "#ffcc00"
+                        }
                         stroke="rgba(255,255,255,.15)"
                       />
                     ))}
@@ -236,6 +361,7 @@ export default function Supervisor() {
               </ResponsiveContainer>
             </div>
           </div>
+
         </div>
 
         {/* Tabla */}

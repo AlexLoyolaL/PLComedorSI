@@ -10,16 +10,23 @@ import {
   updateSaleTx,
 } from "../lib/sales";
 import { Card } from "../ui/Card";
+import { doc, onSnapshot, collection } from "firebase/firestore";
+import { db } from "../firebase";
 
 type Row = {
   id: string;
   ts: any;
   seller: any;
   member: { id: string };
-  itemType: "MENU" | "VEGGIE";
+  itemType: "MENU" | "VEGGIE" | "CELIACO";
   destination: { mode: "COMEDOR" | "VIANDA"; table: string | null };
   allowDouble: boolean;
   voided: boolean;
+};
+
+type OrderData = {
+  itemType: "MENU" | "VEGGIE" | "CELIACO";
+  dest: { mode: "COMEDOR" | "VIANDA"; table: string | null };
 };
 
 // Helper: el lector USB suele mandar \r o \n al final
@@ -34,12 +41,20 @@ export default function Caja() {
   const [memberInput, setMemberInput] = useState("");
   const [orderInput, setOrderInput] = useState("");
 
+  const [limits, setLimits] = useState<{
+    MENU: number | null;
+    VEGGIE: number | null;
+    CELIACO: number | null;
+  }>({
+    MENU: null,
+    VEGGIE: null,
+    CELIACO: null,
+  });
+
+
   // Datos parseados
   const [memberId, setMemberId] = useState("");
-  const [order, setOrder] = useState<{
-    itemType: "MENU" | "VEGGIE";
-    dest: { mode: "COMEDOR" | "VIANDA"; table: string | null };
-  } | null>(null);
+  const [order, setOrder] = useState<OrderData | null>(null);
 
   // Duplicado: solo mostramos si hace falta
   const [dupInfo, setDupInfo] = useState<{ needed: boolean; message: string }>(
@@ -55,7 +70,115 @@ export default function Caja() {
 
   // Listado en vivo
   const [rows, setRows] = useState<Row[]>([]);
+  const [searchSocio, setSearchSocio] = useState("");
+  const [manualAdds, setManualAdds] = useState<any[]>([]);
+
   useEffect(() => listenTodaySales(setRows), []);
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "adminAdds"), (snap) => {
+      const today = todayKey();
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) }))
+        .filter((r) => r.dateKey === today);
+
+      setManualAdds(list);
+    });
+
+    return () => unsub();
+  }, []);
+
+
+  const filteredRows = useMemo(() => {
+    const q = searchSocio.trim().toLowerCase();
+    if (!q) return rows;
+
+    return rows.filter((r) => {
+      const id = (r.member?.id ?? "").toLowerCase();
+      return id.includes(q);
+    });
+  }, [rows, searchSocio]);
+
+
+
+  const viandaCounts = useMemo(
+    () =>
+      rows.reduce(
+        (acc, r) => {
+          if (!r.voided) {
+            if (
+              r.itemType === "MENU" ||
+              r.itemType === "VEGGIE" ||
+              r.itemType === "CELIACO"
+            ) {
+              acc[r.itemType] = (acc[r.itemType] ?? 0) + 1;
+            }
+          }
+          return acc;
+        },
+        {
+          MENU: 0,
+          VEGGIE: 0,
+          CELIACO: 0,
+        } as Record<"MENU" | "VEGGIE" | "CELIACO", number>
+      ),
+    [rows]
+  );
+
+  const adminCounts = useMemo(
+    () =>
+      manualAdds.reduce(
+        (acc, r) => {
+          const t = (r.itemType as "MENU" | "VEGGIE" | "CELIACO") || "MENU";
+          const q = Number(r.qty) || 0;
+          if (t === "MENU" || t === "VEGGIE" || t === "CELIACO") {
+            acc[t] = (acc[t] ?? 0) + q;
+          }
+          return acc;
+        },
+        {
+          MENU: 0,
+          VEGGIE: 0,
+          CELIACO: 0,
+        } as Record<"MENU" | "VEGGIE" | "CELIACO", number>
+      ),
+    [manualAdds]
+  );
+
+
+  const totalUsadas: Record<"MENU" | "VEGGIE" | "CELIACO", number> = {
+    MENU: viandaCounts.MENU + adminCounts.MENU,
+    VEGGIE: viandaCounts.VEGGIE + adminCounts.VEGGIE,
+    CELIACO: viandaCounts.CELIACO + adminCounts.CELIACO,
+  };
+
+  const remainingViandas: Record<"MENU" | "VEGGIE" | "CELIACO", number | null> = {
+    MENU:
+      limits.MENU != null ? Math.max(limits.MENU - totalUsadas.MENU, 0) : null,
+    VEGGIE:
+      limits.VEGGIE != null ? Math.max(limits.VEGGIE - totalUsadas.VEGGIE, 0) : null,
+    CELIACO:
+      limits.CELIACO != null ? Math.max(limits.CELIACO - totalUsadas.CELIACO, 0) : null,
+  };
+
+
+
+  useEffect(() => {
+    const ref = doc(db, "settings_day", todayKey());
+    const unsub = onSnapshot(ref, (snap) => {
+      const data = (snap.data() as any) || {};
+      const ls = data.limits || {};
+
+      setLimits({
+        MENU: typeof ls.MENU === "number" ? ls.MENU : null,
+        VEGGIE: typeof ls.VEGGIE === "number" ? ls.VEGGIE : null,
+        CELIACO: typeof ls.CELIACO === "number" ? ls.CELIACO : null,
+      });
+    });
+
+    return () => unsub();
+  }, []);
+
 
   // Foco inicial en Socio
   useEffect(() => { socioRef.current?.focus(); }, []);
@@ -86,45 +209,78 @@ export default function Caja() {
   }
 
   // Paso 2: Pedido (parsea y confirma)
+  // Paso 2: Pedido (parsea y confirma)
   function handlePedidoEnter() {
     try {
       const p = parseOrderQR(orderInput);
       setOrder(p);
       setMsg("");
-      confirmIfReady(false); // auto-confirmar
+
+      // Usamos el pedido recién leído para confirmar de una
+      confirmIfReady(false, p); // auto-confirmar
     } catch (e: any) {
       setMsg(e.message); beep(false);
     }
   }
 
-  // Confirmar venta
-  async function confirmIfReady(allowDouble: boolean) {
-    if (!user || !order || !memberId) return;
-    setMsg(""); setDupInfo({ needed: false, message: "" });
 
-    try {
-      await ensureDaySettings();
-      await createSaleTx({
-        seller: { uid: user.uid, email: user.email ?? "", name: user.displayName ?? "" },
-        memberId,
-        itemType: order.itemType,
-        dest: order.dest,
-        allowDouble
-      });
-      beep(true);
-      // limpiar y volver a socio
-      setMemberInput(""); setOrderInput(""); setMemberId(""); setOrder(null);
-      socioRef.current?.focus();
-    } catch (e: any) {
-      const m = String(e.message || e);
-      if (m.toLowerCase().includes("ya tiene una compra")) {
-        setDupInfo({ needed: true, message: m }); // pedir autorización de doble compra
-      } else {
-        setMsg(m); beep(false);
+
+  // Confirmar venta
+    async function confirmIfReady(
+      allowDouble: boolean,
+      orderOverride?: {
+        itemType: "MENU" | "VEGGIE" | "CELIACO";
+        dest: { mode: "COMEDOR" | "VIANDA"; table: string | null };
       }
-      pedidoRef.current?.focus();
+    ) {
+      const currentOrder = orderOverride ?? order;
+
+      if (!user || !currentOrder || !memberId) return;
+      setMsg("");
+      setDupInfo({ needed: false, message: "" });
+
+      // Validación de límite de VIANDAS por tipo
+      if (currentOrder.dest.mode === "VIANDA") {
+        const tipo = currentOrder.itemType; // "MENU" | "VEGGIE" | "CELIACO"
+        const limit = limits[tipo];
+        const usadas = viandaCounts[tipo] ?? 0;
+
+        if (typeof limit === "number" && limit >= 0 && usadas >= limit) {
+          setMsg(`No hay más  raciones disponibles para ${tipo} hoy.`);
+          beep(false);
+          return;
+        }
+      }
+
+      try {
+        await ensureDaySettings();
+        await createSaleTx({
+          seller: { uid: user.uid, email: user.email ?? "", name: user.displayName ?? "" },
+          memberId,
+          itemType: currentOrder.itemType,
+          dest: currentOrder.dest,
+          allowDouble,
+        });
+        beep(true);
+        // limpiar y volver a socio
+        setMemberInput("");
+        setOrderInput("");
+        setMemberId("");
+        setOrder(null);
+        socioRef.current?.focus();
+      } catch (e: any) {
+        const m = String(e.message || e);
+        if (m.toLowerCase().includes("ya tiene una compra")) {
+          setDupInfo({ needed: true, message: m });
+        } else {
+          setMsg(m);
+        }
+        beep(false);
+      }
     }
-  }
+
+
+
 
   // Atajo F2 para confirmar con doble compra cuando aparece el banner
   useEffect(() => {
@@ -144,8 +300,8 @@ export default function Caja() {
   }
 
   async function editar(r: Row) {
-    const nuevoTipo = prompt("Tipo (MENU/VEGGIE):", r.itemType)?.toUpperCase();
-    if (!nuevoTipo || (nuevoTipo !== "MENU" && nuevoTipo !== "VEGGIE")) return;
+    const nuevoTipo = prompt("Tipo (MENU/VEGGIE/CELIACO):", r.itemType)?.toUpperCase();
+    if (!nuevoTipo || (nuevoTipo !== "MENU" && nuevoTipo !== "VEGGIE" && nuevoTipo !== "CELIACO")) return;
 
     const modo = prompt("Destino (COMEDOR/VIANDA):", r.destination.mode)?.toUpperCase();
     if (!modo || (modo !== "COMEDOR" && modo !== "VIANDA")) return;
@@ -314,8 +470,75 @@ export default function Caja() {
       </div>
 
       {/* Columna derecha: resumen (sticky) */}
-      <div style={{ position: "sticky", top: 64, alignSelf: "start" }}>
+      <div
+        style={{
+          position: "sticky",
+          top: 64,
+          alignSelf: "start",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+        }}
+      >
+        {/* Contador de viandas bien compacto */}
+        <Card title="Ventas">
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              fontSize: 12,
+              fontWeight: 600, // para las etiquetas en negrita
+              textAlign: "center",
+            }}
+          >
+            <div style={{ flex: 1, textAlign: "left" }}>
+              MENU:&nbsp;
+              <span style={{ fontWeight: 400 }}>
+                {totalUsadas.MENU}
+                {limits.MENU != null
+                  ? ` / ${limits.MENU} (quedan ${remainingViandas.MENU})`
+                  : " / –"}
+              </span>
+            </div>
+
+            <div style={{ flex: 1, textAlign: "center" }}>
+              VEGGIE:&nbsp;
+              <span style={{ fontWeight: 400 }}>
+                {totalUsadas.VEGGIE}
+                {limits.VEGGIE != null
+                  ? ` / ${limits.VEGGIE} (quedan ${remainingViandas.VEGGIE})`
+                  : " / –"}
+              </span>
+            </div>
+
+            <div style={{ flex: 1, textAlign: "right" }}>
+              CELIACO:&nbsp;
+              <span style={{ fontWeight: 400 }}>
+                {totalUsadas.CELIACO}
+                {limits.CELIACO != null
+                  ? ` / ${limits.CELIACO} (quedan ${remainingViandas.CELIACO})`
+                  : " / –"}
+              </span>
+            </div>
+          </div>
+        </Card>
+
         <Card title={`Resumen hoy ${todayKey()}`}>
+          <div style={{ marginBottom: 8 }}>
+            <input
+              type="text"
+              placeholder="Buscar socio por nombre o DNI..."
+              value={searchSocio}
+              onChange={(e) => setSearchSocio(e.target.value)}
+              style={{
+                width: "100%",
+                padding: 6,
+                fontSize: 14,
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
           <p style={{ marginTop: 0, color: "var(--muted)" }}>
             Listado en vivo (últimas 100). Podés editar rápido o anular.
           </p>
@@ -333,7 +556,7 @@ export default function Caja() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
+                {filteredRows.map((r) => (
                   <tr key={r.id} style={{ opacity: r.voided ? 0.5 : 1 }}>
                     <td>{r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : ""}</td>
                     <td>{r.member?.id}</td>
