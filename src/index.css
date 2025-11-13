@@ -97,3 +97,249 @@ body{
 .table{ width:100%; border-collapse: collapse; }
 .table th,.table td{ padding:10px 8px; border-bottom:1px solid #1b2544 }
 .table th{ text-align:left; color:#aab4d6; font-weight:600 }
+
+/* Contenedor general */
+.rendicion-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px;
+}
+
+/* Botón imprimir solo para pantalla */
+.screen-only {
+  margin-bottom: 12px;
+}
+
+/* Área donde irán las 2 copias (en print) */
+.rendicion-page {
+  width: 100%;
+  max-width: 1000px;
+  display: flex;
+  flex-direction: column; /* en pantalla solo una debajo de otra */
+  align-items: center;
+  gap: 12px;
+}
+
+/* Cada instancia de la rendición */
+.rendicion-instance {
+  width: 100%;
+}
+
+/* Segunda copia: oculta en pantalla */
+.rendicion-copy {
+  display: none;
+}
+
+/* Tarjeta principal */
+.rendicion-card {
+  background: #ffffff;
+  color: #000000;
+  border: 1px solid #000;
+  padding: 12px 16px;
+  font-family: Arial, sans-serif;
+  font-size: 11px;
+  box-sizing: border-box;
+}
+
+/* Encabezado */
+.rendicion-header {
+  text-align: left;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+/* Tabla prolija */
+.rendicion-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+
+.rendicion-table th,
+.rendicion-table td {
+  border: 1px solid #000;
+  padding: 4px 6px;
+  box-sizing: border-box;
+}
+
+.rendicion-table th {
+  font-weight: bold;
+}
+
+.rendicion-table .col-concepto {
+  text-align: left;
+  width: 40%;
+}
+
+.rendicion-table .col-valor,
+.rendicion-table .col-cant,
+.rendicion-table .col-rec {
+  text-align: center;
+}
+
+.rendicion-table td:first-child {
+  text-align: left;
+}
+
+.rendicion-table td.num {
+  text-align: right;
+}
+
+/* Inputs con aire */
+.rendicion-table input {
+  width: 100%;
+  padding: 2px 4px;
+  border: none;
+  outline: none;
+  font-size: 11px;
+  font-family: inherit;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+/* Totales y observaciones */
+.rendicion-totales {
+  margin-top: 4px;
+  font-size: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rendicion-observaciones {
+  margin-top: 6px;
+  font-size: 10px;
+}
+
+.obs-box {
+  border: 1px solid #000;
+  height: 32px;
+  margin-top: 2px;
+}
+
+.rendicion-firma {
+  margin-top: 10px;
+  font-size: 10px;
+}
+
+.firma-line {
+  border-bottom: 1px solid #000;
+  margin-top: 10px;
+}
+
+/* Modo impresión */
+@media print {
+  body {
+    margin: 0;
+    background: #ffffff;
+  }
+
+  @page {
+    size: A4 landscape;
+    margin: 10mm;
+  }
+
+  .screen-only {
+    display: none !important;
+  }
+
+  .rendicion-wrapper {
+    padding: 0;
+  }
+
+  .rendicion-page {
+    max-width: 100%;
+    flex-direction: row;       /* 2 copias lado a lado */
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .rendicion-instance {
+    width: 50%;
+  }
+
+  .rendicion-copy {
+    display: block;           /* segunda copia solo en impresión */
+  }
+
+  .rendicion-card {
+    font-size: 9pt;
+    padding: 8px 10px;
+  }
+}
+
+/* Header nuevo */
+.rendicion-header {
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.rendicion-title {
+  text-align: center;
+  font-weight: 700;
+  font-size: 14px;
+  text-transform: uppercase;
+}
+
+.rendicion-subtitle {
+  text-align: center;
+  margin-top: 2px;
+  font-size: 11px;
+}
+
+.rendicion-date {
+  text-align: right;
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+/* Campos editables más llamativos */
+.rendicion-table input.editable-input,
+.editable-area {
+  background: #fff9c4;        /* amarillito suave */
+  border: 1px solid #999;
+}
+
+.rendicion-table input.editable-input:focus,
+.editable-area:focus {
+  outline: 2px solid #000000;
+}
+
+/* Textarea de observaciones */
+.obs-textarea {
+  width: 100%;
+  color: #000 !important;  
+  min-height: 40px;
+  margin-top: 4px;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 10px;
+  resize: vertical;
+  border: 1px solid #000000;
+  padding: 4px;
+  opacity: 1 !important;  
+}
+
+/* Filtros arriba (fecha + botón) */
+.rendicion-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  max-width: 1000px;
+  margin-bottom: 12px;
+}
+
+.rendicion-filters label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.rendicion-filters input[type="date"] {
+  padding: 2px 4px;
+  font-size: 12px;
+}

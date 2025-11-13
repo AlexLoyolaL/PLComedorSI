@@ -3,14 +3,17 @@ import Login from "./pages/Login";
 import Caja from "./pages/Caja";
 import Cocina from "./pages/Cocina";
 import Supervisor from "./pages/Supervisor";
-import AdminViandasPage from "./pages/AdminViandas"; // 👈 nuevo import
+import AdminViandasPage from "./pages/AdminViandas";
+import RendicionPage from "./pages/Rendicion"; // 👈 nueva página
 import { useState } from "react";
-import { useRoleGate } from "./hooks/useRoleGate";    // 👈 para saber si es admin
+import { useRoleGate } from "./hooks/useRoleGate";
+
+type Tab = "caja" | "cocina" | "super" | "admin" | "rendicion";
 
 export default function App() {
   const { user, logout } = useAuth();
-  const [tab, setTab] = useState<"caja" | "cocina" | "super" | "admin">("caja");
-  const { isAdmin } = useRoleGate(); // 👈 detecta si es admin
+  const [tab, setTab] = useState<Tab>("caja");
+  const { isAdmin } = useRoleGate();
 
   if (!user) return <Login />;
 
@@ -35,12 +38,14 @@ export default function App() {
         >
           Caja
         </button>
+
         <button
           className={`tab ${tab === "cocina" ? "active" : ""}`}
           onClick={() => setTab("cocina")}
         >
           Cocina
         </button>
+
         <button
           className={`tab ${tab === "super" ? "active" : ""}`}
           onClick={() => setTab("super")}
@@ -48,13 +53,22 @@ export default function App() {
           Supervisor
         </button>
 
-        {isAdmin && ( // 👈 Solo visible para admin
-          <button
-            className={`tab ${tab === "admin" ? "active" : ""}`}
-            onClick={() => setTab("admin")}
-          >
-            Admin Viandas
-          </button>
+        {isAdmin && (
+          <>
+            <button
+              className={`tab ${tab === "admin" ? "active" : ""}`}
+              onClick={() => setTab("admin")}
+            >
+              Admin Viandas
+            </button>
+
+            <button
+              className={`tab ${tab === "rendicion" ? "active" : ""}`}
+              onClick={() => setTab("rendicion")}
+            >
+              Rendición
+            </button>
+          </>
         )}
 
         <div className="fill" />
@@ -68,7 +82,8 @@ export default function App() {
         {tab === "caja" && <Caja />}
         {tab === "cocina" && <Cocina />}
         {tab === "super" && <Supervisor />}
-        {tab === "admin" && isAdmin && <AdminViandasPage />} {/* 👈 renderiza el panel */}
+        {tab === "admin" && isAdmin && <AdminViandasPage />}
+        {tab === "rendicion" && isAdmin && <RendicionPage />}
       </div>
     </div>
   );
