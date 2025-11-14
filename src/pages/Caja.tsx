@@ -22,7 +22,9 @@ type Row = {
   destination: { mode: "COMEDOR" | "VIANDA"; table: string | null };
   allowDouble: boolean;
   voided: boolean;
+  manual?: boolean;          // <- NUEVO: marca cargas desde AdminViandas
 };
+
 
 type OrderData = {
   itemType: "MENU" | "VEGGIE" | "CELIACO";
@@ -90,10 +92,13 @@ export default function Caja() {
 
 
   const filteredRows = useMemo(() => {
-    const q = searchSocio.trim().toLowerCase();
-    if (!q) return rows;
+    // siempre escondemos las ventas manuales
+    const base = rows.filter((r) => !r.manual);
 
-    return rows.filter((r) => {
+    const q = searchSocio.trim().toLowerCase();
+    if (!q) return base;
+
+    return base.filter((r) => {
       const id = (r.member?.id ?? "").toLowerCase();
       return id.includes(q);
     });
@@ -101,11 +106,13 @@ export default function Caja() {
 
 
 
+
   const viandaCounts = useMemo(
     () =>
       rows.reduce(
         (acc, r) => {
-          if (!r.voided) {
+          // solo contamos ventas reales de Caja (no manuales)
+          if (!r.voided && !r.manual) {
             if (
               r.itemType === "MENU" ||
               r.itemType === "VEGGIE" ||
@@ -124,6 +131,7 @@ export default function Caja() {
       ),
     [rows]
   );
+
 
   const adminCounts = useMemo(
     () =>
@@ -243,7 +251,8 @@ export default function Caja() {
       if (currentOrder.dest.mode === "VIANDA") {
         const tipo = currentOrder.itemType; // "MENU" | "VEGGIE" | "CELIACO"
         const limit = limits[tipo];
-        const usadas = viandaCounts[tipo] ?? 0;
+        const usadas = totalUsadas[tipo] ?? 0;
+
 
         if (typeof limit === "number" && limit >= 0 && usadas >= limit) {
           setMsg(`No hay más  raciones disponibles para ${tipo} hoy.`);

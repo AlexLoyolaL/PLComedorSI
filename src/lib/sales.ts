@@ -153,10 +153,9 @@ export async function createSaleTx(params: {
       }
 
       if (!mesaOk(params.itemType, params.dest.table)) {
-        throw new Error(
-          "La mesa no corresponde al tipo: MENU/CELIACO → mesas 01–19 y 24–34; VEGGIE → mesas 20–23."
-        );
+        throw new Error("Mesa inválida. Usá mesas del 01 al 34.");
       }
+
     }
 
     // 4) Duplicado por socio

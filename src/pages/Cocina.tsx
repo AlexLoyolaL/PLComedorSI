@@ -103,6 +103,14 @@ export default function Cocina() {
   const comedor = data.comedor ?? { MENU: 0, VEGGIE: 0, CELIACO: 0, byTable: {} };
   const vianda = data.vianda ?? { MENU: 0, VEGGIE: 0, CELIACO: 0 };
 
+  // solo ventas reales de caja (vianda total menos lo solicitado por administración)
+  const viandaSoloCaja = {
+    MENU: Math.max((vianda.MENU ?? 0) - (adminAgg.MENU ?? 0), 0),
+    VEGGIE: Math.max((vianda.VEGGIE ?? 0) - (adminAgg.VEGGIE ?? 0), 0),
+    CELIACO: Math.max((vianda.CELIACO ?? 0) - (adminAgg.CELIACO ?? 0), 0),
+  };
+
+
   const mesasOrdenadas = useMemo(() => {
     const entries = Object.entries(comedor.byTable ?? {});
     return entries.sort((a, b) => {
@@ -150,9 +158,9 @@ export default function Cocina() {
       </Card>
 
       <Card title="VIANDA">
-        <div>MENU: <b>{vianda.MENU ?? 0}</b></div>
-        <div>VEGGIE: <b>{vianda.VEGGIE ?? 0}</b></div>
-        <div>CELIACO: <b>{vianda.CELIACO ?? 0}</b></div>
+        <div>MENU: <b>{viandaSoloCaja.MENU}</b></div>
+        <div>VEGGIE: <b>{viandaSoloCaja.VEGGIE}</b></div>
+        <div>CELIACO: <b>{viandaSoloCaja.CELIACO}</b></div>
       </Card>
 
       <Card title="Solicitado por Administración">

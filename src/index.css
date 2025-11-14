@@ -138,7 +138,7 @@ body{
   border: 1px solid #000;
   padding: 12px 16px;
   font-family: Arial, sans-serif;
-  font-size: 11px;
+  font-size: 14px;
   box-sizing: border-box;
 }
 
@@ -193,24 +193,21 @@ body{
   padding: 2px 4px;
   border: none;
   outline: none;
-  font-size: 11px;
+  font-size: 14px;
   font-family: inherit;
   text-align: center;
   box-sizing: border-box;
 }
 
-/* Totales y observaciones */
-.rendicion-totales {
-  margin-top: 4px;
-  font-size: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.rendicion-totales div:nth-child(2),
+.rendicion-totales div:nth-child(3) {
+  font-weight: 700 !important;
+  font-size: 15px !important;
 }
 
 .rendicion-observaciones {
   margin-top: 6px;
-  font-size: 10px;
+  font-size: 14px;
 }
 
 .obs-box {
@@ -221,7 +218,7 @@ body{
 
 .rendicion-firma {
   margin-top: 10px;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .firma-line {
@@ -279,20 +276,20 @@ body{
 .rendicion-title {
   text-align: center;
   font-weight: 700;
-  font-size: 14px;
+  font-size: 16px;
   text-transform: uppercase;
 }
 
 .rendicion-subtitle {
   text-align: center;
   margin-top: 2px;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .rendicion-date {
   text-align: right;
   margin-top: 4px;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 /* Campos editables más llamativos */

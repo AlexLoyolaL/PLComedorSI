@@ -162,16 +162,32 @@ const RendicionPage: React.FC = () => {
 
   const viandaCounts = useMemo(
     () =>
-      rows.reduce((acc, r: any) => {
-        if (!r.voided) {
-          if (r.itemType === "MENU" || r.itemType === "VEGGIE" || r.itemType === "CELIACO") {
+      rows.reduce(
+        (acc, r: any) => {
+          // SOLO ventas de caja con socio real
+          const memberId = (r.member?.id ?? "").trim();
+
+          if (
+            !r.voided &&
+            memberId !== "" && // excluye las cargas sin socio (AdminViandas)
+            (r.itemType === "MENU" ||
+              r.itemType === "VEGGIE" ||
+              r.itemType === "CELIACO")
+          ) {
             acc[r.itemType as "MENU" | "VEGGIE" | "CELIACO"]++;
           }
-        }
-        return acc;
-      }, { MENU: 0, VEGGIE: 0, CELIACO: 0 }),
+
+          return acc;
+        },
+        { MENU: 0, VEGGIE: 0, CELIACO: 0 } as Record<
+          "MENU" | "VEGGIE" | "CELIACO",
+          number
+        >
+      ),
     [rows]
   );
+
+
 
   const now = new Date();
   const fechaTexto = now.toLocaleDateString("es-AR");

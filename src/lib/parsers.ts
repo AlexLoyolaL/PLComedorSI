@@ -58,21 +58,14 @@ export function parseOrderQR(qrText: string): { itemType: ItemType; dest: Destin
 }
 
 // util para validaciones de mesa
+// util para validaciones de mesa
 export function mesaOk(itemType: ItemType, table: string) {
   const num = parseInt(table.replace(/[^\d]/g, ""), 10);
   if (Number.isNaN(num)) return false;
 
-  // MENU o CELIACO: mesas 1–19 y 24–34
-  if (itemType === "MENU" || itemType === "CELIACO") {
-    return (num >= 1 && num <= 19) || (num >= 24 && num <= 34);
-  }
-
-  // VEGGIE: mesas 20–23
-  if (itemType === "VEGGIE") {
-    return num >= 20 && num <= 23;
-  }
-
-  return false;
+  // ✅ Mesa válida simplemente si está en el rango 1–34
+  //    (no depende del tipo de vianda)
+  return num >= 1 && num <= 34;
 }
 
 

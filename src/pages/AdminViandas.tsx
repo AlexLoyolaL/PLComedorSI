@@ -17,7 +17,9 @@ type Row = {
   destination: { mode: "COMEDOR" | "VIANDA"; table: string | null };
   allowDouble: boolean;
   voided: boolean;
+  manual?: boolean; // ← ventas generadas desde AdminViandas
 };
+
 
 
 export default function AdminViandasPage() {
@@ -104,12 +106,16 @@ function AdminViandasInner() {
   }, []);
 
     // Totales por tipo: ventas del día + cargas manuales
+    // Totales por tipo: ventas del día (solo Caja) + cargas manuales
   useEffect(() => {
-    let tm = 0, tv = 0, tc = 0;
+    let tm = 0,
+      tv = 0,
+      tc = 0;
 
-    // 1) Ventas "normales" (Caja)
-    for (const r of rows) {
+    // 1) Ventas "normales" (Caja) → excluimos las ventas manuales
+    for (const r of rows as Row[]) {
       if (r.voided) continue;
+      if (r.manual) continue; // estas ya se cuentan en adminAdds
 
       if (r.itemType === "MENU") {
         tm += 1;
@@ -136,6 +142,7 @@ function AdminViandasInner() {
     setTotalVeggie(tv);
     setTotalCeliaco(tc);
   }, [rows, manualAdds]);
+
 
 
     // Resumen "Cargas manuales" (Total extra + breakdown)
