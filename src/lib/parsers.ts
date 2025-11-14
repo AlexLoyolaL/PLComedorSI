@@ -59,7 +59,7 @@ export function parseOrderQR(qrText: string): { itemType: ItemType; dest: Destin
 
 // util para validaciones de mesa
 // util para validaciones de mesa
-export function mesaOk(itemType: ItemType, table: string) {
+export function mesaOk(_itemType: ItemType, table: string) {
   const num = parseInt(table.replace(/[^\d]/g, ""), 10);
   if (Number.isNaN(num)) return false;
 
