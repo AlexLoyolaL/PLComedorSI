@@ -269,15 +269,15 @@ export default function Supervisor() {
             <div style={{ height: 260 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={dailyData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,.2)" />
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(204, 204, 204, 1)" />
                   <XAxis dataKey="date" tick={{ fill: "#fff" }} />
                   <YAxis allowDecimals={false} tick={{ fill: "#fff" }} />
                   <Tooltip
-                    contentStyle={{ background: "rgba(20,24,36,.95)", border: "1px solid #334", color: "#fff" }}
+                    contentStyle={{ background: "rgba(18, 24, 42, 0.95)", border: "1px solid #334", color: "#fff" }}
                     labelStyle={{ color: "#fff" }}
                     itemStyle={{ color: "#fff" }}
                   />
-                  <Bar dataKey="total" />
+                  <Bar dataKey="total"  fill="#4cc9f0" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
