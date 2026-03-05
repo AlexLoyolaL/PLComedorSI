@@ -25,7 +25,6 @@ type Row = {
   manual?: boolean;          // <- NUEVO: marca cargas desde AdminViandas
 };
 
-
 type OrderData = {
   itemType: "MENU" | "VEGGIE" | "CELIACO";
   dest: { mode: "COMEDOR" | "VIANDA"; table: string | null };
@@ -53,10 +52,13 @@ export default function Caja() {
     CELIACO: null,
   });
 
-
   // Datos parseados
   const [memberId, setMemberId] = useState("");
   const [order, setOrder] = useState<OrderData | null>(null);
+
+  // --- NUEVO: Control de carga y bloqueos de tiempo ---
+  const [isLoading, setIsLoading] = useState(false);
+  const lastScansRef = useRef<Map<string, number>>(new Map());
 
   // Duplicado: solo mostramos si hace falta
   const [dupInfo, setDupInfo] = useState<{ needed: boolean; message: string }>(
@@ -90,7 +92,6 @@ export default function Caja() {
     return () => unsub();
   }, []);
 
-
   const filteredRows = useMemo(() => {
     // siempre escondemos las ventas manuales
     const base = rows.filter((r) => !r.manual);
@@ -103,9 +104,6 @@ export default function Caja() {
       return id.includes(q);
     });
   }, [rows, searchSocio]);
-
-
-
 
   const viandaCounts = useMemo(
     () =>
@@ -132,7 +130,6 @@ export default function Caja() {
     [rows]
   );
 
-
   const adminCounts = useMemo(
     () =>
       manualAdds.reduce(
@@ -153,7 +150,6 @@ export default function Caja() {
     [manualAdds]
   );
 
-
   const totalUsadas: Record<"MENU" | "VEGGIE" | "CELIACO", number> = {
     MENU: viandaCounts.MENU + adminCounts.MENU,
     VEGGIE: viandaCounts.VEGGIE + adminCounts.VEGGIE,
@@ -168,8 +164,6 @@ export default function Caja() {
     CELIACO:
       limits.CELIACO != null ? Math.max(limits.CELIACO - totalUsadas.CELIACO, 0) : null,
   };
-
-
 
   useEffect(() => {
     const ref = doc(db, "settings_day", todayKey());
@@ -186,7 +180,6 @@ export default function Caja() {
 
     return () => unsub();
   }, []);
-
 
   // Foco inicial en Socio
   useEffect(() => { socioRef.current?.focus(); }, []);
@@ -217,7 +210,6 @@ export default function Caja() {
   }
 
   // Paso 2: Pedido (parsea y confirma)
-  // Paso 2: Pedido (parsea y confirma)
   function handlePedidoEnter() {
     try {
       const p = parseOrderQR(orderInput);
@@ -231,65 +223,83 @@ export default function Caja() {
     }
   }
 
-
-
   // Confirmar venta
-    async function confirmIfReady(
-      allowDouble: boolean,
-      orderOverride?: {
-        itemType: "MENU" | "VEGGIE" | "CELIACO";
-        dest: { mode: "COMEDOR" | "VIANDA"; table: string | null };
-      }
-    ) {
-      const currentOrder = orderOverride ?? order;
+  async function confirmIfReady(
+    allowDouble: boolean,
+    orderOverride?: {
+      itemType: "MENU" | "VEGGIE" | "CELIACO";
+      dest: { mode: "COMEDOR" | "VIANDA"; table: string | null };
+    }
+  ) {
+    if (isLoading) return; // Evita el "clic-clic-clic" desesperado
 
-      if (!user || !currentOrder || !memberId) return;
-      setMsg("");
-      setDupInfo({ needed: false, message: "" });
+    const currentOrder = orderOverride ?? order;
 
-      // Validación de límite de VIANDAS por tipo
-      if (currentOrder.dest.mode === "VIANDA") {
-        const tipo = currentOrder.itemType; // "MENU" | "VEGGIE" | "CELIACO"
-        const limit = limits[tipo];
-        const usadas = totalUsadas[tipo] ?? 0;
+    if (!user || !currentOrder || !memberId) return;
+    setMsg("");
+    setDupInfo({ needed: false, message: "" });
 
+    // --- NUEVO: Validación local de 30 segundos ---
+    const now = Date.now();
+    const lastScanTime = lastScansRef.current.get(memberId) || 0;
+    
+    // Si no estamos forzando (allowDouble) y pasaron menos de 30 segundos (30000ms)
+    if (!allowDouble && (now - lastScanTime < 30000)) {
+      setDupInfo({
+        needed: true,
+        message: `Epa, esto ya se cargó hace menos de 30 segundos, ¿estás seguro?`
+      });
+      beep(false);
+      return; 
+    }
 
-        if (typeof limit === "number" && limit >= 0 && usadas >= limit) {
-          setMsg(`No hay más  raciones disponibles para ${tipo} hoy.`);
-          beep(false);
-          return;
-        }
-      }
+    // Validación de límite de VIANDAS por tipo
+    if (currentOrder.dest.mode === "VIANDA") {
+      const tipo = currentOrder.itemType; 
+      const limit = limits[tipo];
+      const usadas = totalUsadas[tipo] ?? 0;
 
-      try {
-        await ensureDaySettings();
-        await createSaleTx({
-          seller: { uid: user.uid, email: user.email ?? "", name: user.displayName ?? "" },
-          memberId,
-          itemType: currentOrder.itemType,
-          dest: currentOrder.dest,
-          allowDouble,
-        });
-        beep(true);
-        // limpiar y volver a socio
-        setMemberInput("");
-        setOrderInput("");
-        setMemberId("");
-        setOrder(null);
-        socioRef.current?.focus();
-      } catch (e: any) {
-        const m = String(e.message || e);
-        if (m.toLowerCase().includes("ya tiene una compra")) {
-          setDupInfo({ needed: true, message: m });
-        } else {
-          setMsg(m);
-        }
+      if (typeof limit === "number" && limit >= 0 && usadas >= limit) {
+        setMsg(`No hay más raciones disponibles para ${tipo} hoy.`);
         beep(false);
+        return;
       }
     }
 
+    setIsLoading(true); // Bloqueamos la UI
 
+    try {
+      await ensureDaySettings();
+      await createSaleTx({
+        seller: { uid: user.uid, email: user.email ?? "", name: user.displayName ?? "" },
+        memberId,
+        itemType: currentOrder.itemType,
+        dest: currentOrder.dest,
+        allowDouble,
+      });
 
+      // --- NUEVO: Registramos la hora del éxito para este socio ---
+      lastScansRef.current.set(memberId, Date.now());
+
+      beep(true);
+      // limpiar y volver a socio
+      setMemberInput("");
+      setOrderInput("");
+      setMemberId("");
+      setOrder(null);
+      socioRef.current?.focus();
+    } catch (e: any) {
+      const m = String(e.message || e);
+      if (m.toLowerCase().includes("ya tiene una compra")) {
+        setDupInfo({ needed: true, message: m });
+      } else {
+        setMsg(m);
+      }
+      beep(false);
+    } finally {
+      setIsLoading(false); // Liberamos la UI pase lo que pase
+    }
+  }
 
   // Atajo F2 para confirmar con doble compra cuando aparece el banner
   useEffect(() => {
@@ -300,7 +310,7 @@ export default function Caja() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dupInfo.needed, memberId, order]);
+  }, [dupInfo.needed, memberId, order, isLoading]); // Agregué isLoading a las dependencias por las dudas
 
   // Listado: acciones
   async function anular(id: string) {
@@ -346,6 +356,7 @@ export default function Caja() {
             <input
               ref={socioRef}
               className="input"
+              disabled={isLoading}
               placeholder="Posicioná el cursor aquí y escaneá el QR del socio"
               value={memberInput}
               onChange={(e) => {
@@ -374,6 +385,7 @@ export default function Caja() {
             <input
               ref={pedidoRef}
               className="input"
+              disabled={isLoading}
               placeholder="Luego escaneá el QR de MENU/VEGGIE + MESA/VIANDA"
               value={orderInput}
               onChange={(e) => {
@@ -426,11 +438,16 @@ export default function Caja() {
                 {dupInfo.message}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="button" onClick={() => confirmIfReady(true)}>
-                  Permitir y confirmar (F2)
+                <button 
+                  className="button" 
+                  disabled={isLoading}
+                  onClick={() => confirmIfReady(true)}
+                >
+                  {isLoading ? "Procesando..." : "Permitir y confirmar (F2)"}
                 </button>
                 <button
                   className="button outline"
+                  disabled={isLoading}
                   onClick={() => setDupInfo({ needed: false, message: "" })}
                 >
                   Cancelar
@@ -446,13 +463,14 @@ export default function Caja() {
           <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
             <button
               className="button"
-              disabled={!ready}
+              disabled={!ready || isLoading}
               onClick={() => confirmIfReady(false)}
             >
-              Confirmar venta
+              {isLoading ? "Procesando..." : "Confirmar venta"}
             </button>
             <button
               className="button outline"
+              disabled={isLoading}
               onClick={() => {
                 setMemberInput("");
                 setOrderInput("");
@@ -580,12 +598,14 @@ export default function Caja() {
                             className="button ghost"
                             onClick={() => editar(r)}
                             style={{ marginRight: 8 }}
+                            disabled={isLoading}
                           >
                             Editar
                           </button>
                           <button
                             className="button outline"
                             onClick={() => anular(r.id)}
+                            disabled={isLoading}
                           >
                             Anular
                           </button>
@@ -603,5 +623,4 @@ export default function Caja() {
       </div>
     </div>
   );
-
 }
