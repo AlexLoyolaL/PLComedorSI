@@ -348,7 +348,8 @@ export default function Caja() {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(540px, 1fr) minmax(540px, 1fr)",
+        // El 1fr 2fr significa: dividí el espacio en 3, dale 1 tercio al primero y 2 tercios al segundo
+        gridTemplateColumns: "minmax(400px, 1fr) 2fr", 
         gap: 16,
       }}
     >
