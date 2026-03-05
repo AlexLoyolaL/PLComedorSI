@@ -287,7 +287,11 @@ export default function Caja() {
       setOrderInput("");
       setMemberId("");
       setOrder(null);
-      socioRef.current?.focus();
+      setTimeout(() => {
+        if (socioRef.current) {
+          socioRef.current.focus();
+        }
+      }, 50);
     } catch (e: any) {
       const m = String(e.message || e);
       if (m.toLowerCase().includes("ya tiene una compra")) {
@@ -448,7 +452,11 @@ export default function Caja() {
                 <button
                   className="button outline"
                   disabled={isLoading}
-                  onClick={() => setDupInfo({ needed: false, message: "" })}
+                  onClick={() => {
+                    setDupInfo({ needed: false, message: "" });
+                    // Devolvemos el foco al carnet para que siga trabajando
+                    setTimeout(() => socioRef.current?.focus(), 50);
+                  }}
                 >
                   Cancelar
                 </button>
