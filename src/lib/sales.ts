@@ -247,34 +247,37 @@ export function listenTodaySales(setter: (rows: any[]) => void) {
   });
 }
 
-// ---------- ANULAR VENTA (ajusta agregados) ----------
+// ---------- ANULAR VENTA (VERSIÓN OFFLINE-READY) ----------
 export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
   const key = todayKey();
   const saleRef = doc(db, "sales", id);
   const aggRef = doc(db, "dayAgg", key);
 
-  await runTransaction(db, async (tx) => {
-    const s = await tx.get(saleRef);
-    if (!s.exists()) throw new Error("Venta no encontrada");
-    const sale: any = s.data();
-    if (!!sale.voided === voided) return;
+  // Leemos la venta (si estamos offline, lee de la caché local para no explotar)
+  const s = await getDoc(saleRef).catch(() => null);
+  if (!s || !s.exists()) throw new Error("Venta no encontrada.");
+  const sale: any = s.data();
 
-    const sign = voided ? -1 : 1;
+  if (!!sale.voided === voided) return; // Ya está en el estado deseado
 
-    const fld = sale.destination.mode === "COMEDOR" ? "comedor" : "vianda";
-    const upd: any = {};
-    upd[`${fld}.${sale.itemType}`] = increment(sign);
-    if (sale.destination.mode === "COMEDOR" && sale.destination.table) {
-      const oldK = tableKey(sale.destination.table)!;
-      upd[`comedor.byTable.${oldK}`] = increment(sign);
-    }
-    tx.update(aggRef, upd);
+  const sign = voided ? -1 : 1;
+  const fld = sale.destination.mode === "COMEDOR" ? "comedor" : "vianda";
 
-    tx.update(saleRef, { voided, voidReason: reason ?? null });
-  });
+  // 1) Actualizar agregados (Usamos setDoc con merge para EVITAR el error de "No document to update")
+  const upd: any = { lastUpdated: serverTimestamp() };
+  upd[`${fld}.${sale.itemType}`] = increment(sign);
+
+  if (sale.destination.mode === "COMEDOR" && sale.destination.table) {
+    const oldK = tableKey(sale.destination.table)!;
+    upd[`comedor.byTable.${oldK}`] = increment(sign);
+  }
+
+  // 2) Disparamos los guardados sin await (Fire and forget)
+  setDoc(aggRef, upd, { merge: true });
+  setDoc(saleRef, { voided, voidReason: reason ?? null, updatedAt: serverTimestamp() }, { merge: true });
 }
 
-// ---------- EDITAR VENTA (cambia tipo/destino y recalcula agregados) ----------
+// ---------- EDITAR VENTA (VERSIÓN OFFLINE-READY) ----------
 export async function updateSaleTx(params: {
   saleId: string;
   newItemType: ItemType;
@@ -283,54 +286,46 @@ export async function updateSaleTx(params: {
   const key = todayKey();
   const saleRef = doc(db, "sales", params.saleId);
   const aggRef = doc(db, "dayAgg", key);
-  const settingsRef = doc(db, "settings_day", key);
 
-  await runTransaction(db, async (tx) => {
-    // 1) Venta actual
-    const s = await tx.get(saleRef);
-    if (!s.exists()) throw new Error("Venta no encontrada");
-    const sale: any = s.data();
-    if (sale.voided) throw new Error("No se puede editar una venta anulada");
+  // 1) Venta actual
+  const s = await getDoc(saleRef).catch(() => null);
+  if (!s || !s.exists()) throw new Error("Venta no encontrada");
+  const sale: any = s.data();
+  if (sale.voided) throw new Error("No se puede editar una venta anulada");
 
-    // 2) Settings del día
-    const st = await tx.get(settingsRef);
-    if (!st.exists()) throw new Error("Faltan settings del día");
-
-    // 3) Validar nuevo destino/mesa
-    if (params.newDest.mode === "COMEDOR") {
-      if (!params.newDest.table) throw new Error("Mesa obligatoria en COMEDOR");
-      if (!mesaOk(params.newItemType, params.newDest.table)) {
-        throw new Error("Mesa no corresponde al tipo (01–21 MENU, 22–23 VEGGIE).");
-      }
+  // Validar nuevo destino/mesa (local)
+  if (params.newDest.mode === "COMEDOR") {
+    if (!params.newDest.table) throw new Error("Mesa obligatoria en COMEDOR");
+    if (!mesaOk(params.newItemType, params.newDest.table)) {
+      throw new Error("Mesa no corresponde al tipo (01–21 MENU, 22–23 VEGGIE).");
     }
+  }
 
-    // 4) Restar agregados actuales
-    const oldFld = sale.destination.mode === "COMEDOR" ? "comedor" : "vianda";
-    const down: any = {};
-    down[`${oldFld}.${sale.itemType}`] = increment(-1);
-    if (sale.destination.mode === "COMEDOR" && sale.destination.table) {
-      const oldK = tableKey(sale.destination.table)!;
-      down[`comedor.byTable.${oldK}`] = increment(-1);
-    }
-    tx.update(aggRef, down);
+  // 2) Restar agregados actuales
+  const oldFld = sale.destination.mode === "COMEDOR" ? "comedor" : "vianda";
+  const upd: any = { lastUpdated: serverTimestamp() };
 
-    // 5) Sumar agregados nuevos
-    const newFld = params.newDest.mode === "COMEDOR" ? "comedor" : "vianda";
-    const up: any = {};
-    up[`${newFld}.${params.newItemType}`] = increment(1);
-    if (params.newDest.mode === "COMEDOR" && params.newDest.table) {
-      const newK = tableKey(params.newDest.table)!;
-      up[`comedor.byTable.${newK}`] = increment(1);
-    }
-    tx.update(aggRef, up);
+  upd[`${oldFld}.${sale.itemType}`] = increment(-1);
+  if (sale.destination.mode === "COMEDOR" && sale.destination.table) {
+    const oldK = tableKey(sale.destination.table)!;
+    upd[`comedor.byTable.${oldK}`] = increment(-1);
+  }
 
-    // 6) Actualizar venta
-    tx.update(saleRef, {
-      itemType: params.newItemType,
-      destination: params.newDest,
-      updatedAt: serverTimestamp(),
-    });
-  });
+  // 3) Sumar agregados nuevos
+  const newFld = params.newDest.mode === "COMEDOR" ? "comedor" : "vianda";
+  upd[`${newFld}.${params.newItemType}`] = increment(1);
+  if (params.newDest.mode === "COMEDOR" && params.newDest.table) {
+    const newK = tableKey(params.newDest.table)!;
+    upd[`comedor.byTable.${newK}`] = increment(1);
+  }
+
+  // 4) Ejecutar actualizaciones (Fire and forget, con merge para evitar el crash rojo)
+  setDoc(aggRef, upd, { merge: true });
+  setDoc(saleRef, {
+    itemType: params.newItemType,
+    destination: params.newDest,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
 }
 
 // ---------- (OPCIONAL) Reconstruir agregado del día desde sales ----------
