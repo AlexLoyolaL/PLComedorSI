@@ -66,7 +66,7 @@ export async function ensureDaySettings() {
     const patch: any = {};
 
     if (!data.cutoffs) {
-      patch.cutoffs = { comedor: "20:00", vianda: "20:00" };
+      patch.cutoffs = { comedor: "00:00", vianda: "00:00" };
     }
 
     if (!data.limits) {
@@ -122,7 +122,7 @@ function afterCutoff(mode: "COMEDOR" | "VIANDA", settings: any) {
   return now.isAfter(limit);
 }
 
-// ---------- ALTA DE VENTA ----------
+// ---------- ALTA DE VENTA (VERSIÓN OFFLINE-READY BLINDADA) ----------
 export async function createSaleTx(params: {
   seller: { uid: string; email: string; name: string };
   memberId: string;
@@ -135,148 +135,105 @@ export async function createSaleTx(params: {
   const aggRef = doc(db, "dayAgg", key);
   const indexRef = doc(db, "membersDayIndex", `${key}_${params.memberId}`);
 
-  await runTransaction(db, async (tx) => {
-    // 1) Settings del día
-    const st = await tx.get(settingsRef);
-    if (!st.exists()) throw new Error("Faltan settings del día");
-    const settings = st.data();
-
-    // 2) Cortes horarios
-    if (afterCutoff(params.dest.mode, settings)) {
-      throw new Error(params.dest.mode === "COMEDOR" ? "Cierre de comedor (11:00)." : "Cierre de viandas (13:00).");
-    }
-
-    // 3) Validaciones de mesa/tipo
-    if (params.dest.mode === "COMEDOR") {
-      if (!params.dest.table) {
-        throw new Error("Mesa obligatoria en COMEDOR");
+  // Función auxiliar para leer documentos sin que explote estando offline
+  async function getOfflineSafe(ref: any) {
+    try {
+      const snap = await getDoc(ref);
+      return snap;
+    } catch (e: any) {
+      if (e.message?.toLowerCase().includes("offline") || e.code === "unavailable") {
+        return { exists: () => false, data: () => ({}) }; // Finge que no existe si estamos sin internet
       }
-
-      if (!mesaOk(params.itemType, params.dest.table)) {
-        throw new Error("Mesa inválida. Usá mesas del 01 al 34.");
-      }
-
+      throw e;
     }
+  }
 
-    // 4) Duplicado por socio
-    const idx = await tx.get(indexRef);
-    const prev = idx.exists() ? (idx.data().count as number) : 0;
-    if (prev >= 1 && !params.allowDouble) {
-      throw new Error("Socio ya tiene una compra hoy. Habilitar doble compra para continuar.");
+  // 1) Obtenemos settings de manera segura
+// 1) Obtenemos settings de manera segura
+  const st = await getOfflineSafe(settingsRef);
+  const settings = (st.exists() ? st.data() : {}) as any;
+
+  // 2) Cortes horarios (Comentado para pruebas nocturnas)
+  
+  if (settings.cutoffs && afterCutoff(params.dest.mode, settings)) {
+    const horaCorte = params.dest.mode === "COMEDOR" ? settings.cutoffs.comedor : settings.cutoffs.vianda;
+    throw new Error(`El horario para ${params.dest.mode.toLowerCase()} finalizó a las ${horaCorte} hs.`);
+  }
+  
+
+  // 3) Validaciones de mesa/tipo
+  if (params.dest.mode === "COMEDOR") {
+    if (!params.dest.table) throw new Error("Mesa obligatoria en COMEDOR");
+    if (!mesaOk(params.itemType, params.dest.table)) {
+      throw new Error("Mesa inválida. Usá mesas del 01 al 34.");
     }
+  }
 
-    // 5) Asegurar doc base de agregados y LEERLO para usar valores actuales
-    const aggSnap = await tx.get(aggRef);
+  // 4) Duplicado por socio (Seguro offline)
+  const idx = await getOfflineSafe(indexRef);
+  const prev = idx.exists() ? ((idx.data() as any)?.count as number) : 0;
+  if (prev >= 1 && !params.allowDouble) {
+    throw new Error("Socio ya tiene una compra hoy. Habilitar doble compra para continuar.");
+  }
 
-    let baseAgg: {
-      comedor: { MENU: number; VEGGIE: number; CELIACO: number; byTable: Record<string, number> };
-      vianda: { MENU: number; VEGGIE: number; CELIACO: number };
-    };
+  // 5) Validación de límites diarios (Seguro offline)
+  const aggSnap = await getOfflineSafe(aggRef);
+  const baseAgg = aggSnap.exists() ? (aggSnap.data() as any) : {
+    comedor: { MENU: 0, VEGGIE: 0, CELIACO: 0 },
+    vianda: { MENU: 0, VEGGIE: 0, CELIACO: 0 }
+  };
 
-    if (aggSnap.exists()) {
-      baseAgg = aggSnap.data() as any;
-    } else {
-      baseAgg = {
-        comedor: { MENU: 0, VEGGIE: 0, CELIACO: 0, byTable: {} },
-        vianda:  { MENU: 0, VEGGIE: 0, CELIACO: 0 },
-      };
+  const limits = (settings.limits ?? {}) as {
+    MENU?: number | null;
+    VEGGIE?: number | null;
+    CELIACO?: number | null;
+  };
 
-      // crear el documento base para que luego los tx.update no fallen
-      tx.set(aggRef, baseAgg);
-    }
+  const totalByType: Record<string, number> = {
+    MENU: (baseAgg.comedor?.MENU ?? 0) + (baseAgg.vianda?.MENU ?? 0),
+    VEGGIE: (baseAgg.comedor?.VEGGIE ?? 0) + (baseAgg.vianda?.VEGGIE ?? 0),
+    CELIACO: (baseAgg.comedor?.CELIACO ?? 0) + (baseAgg.vianda?.CELIACO ?? 0),
+  };
 
+  const limit = limits[params.itemType];
+  if (typeof limit === "number" && limit >= 0 && totalByType[params.itemType] >= limit) {
+    throw new Error(`Límite diario alcanzado para ${params.itemType}.`);
+  }
 
-    // 🔹 Agregar acá el control de límite diario
-    // Límite diario por tipo (se configura en settings_day.limits)
-    const limits = (settings.limits ?? {}) as {
-      MENU?: number | null;
-      VEGGIE?: number | null;
-      CELIACO?: number | null;
-    };
-
-    // Totales vendidos por tipo (comedor + vianda) ANTES de esta venta
-    const totalByType: Record<string, number> = {
-      MENU:
-        (baseAgg.comedor?.MENU ?? 0) +
-        (baseAgg.vianda?.MENU ?? 0),
-      VEGGIE:
-        (baseAgg.comedor?.VEGGIE ?? 0) +
-        (baseAgg.vianda?.VEGGIE ?? 0),
-      CELIACO:
-        (baseAgg.comedor?.CELIACO ?? 0) +
-        (baseAgg.vianda?.CELIACO ?? 0),
-    };
-
-    const currentType = params.itemType as ItemType;
-    const limit = limits[currentType];
-
-    if (typeof limit === "number" && limit >= 0) {
-      if (totalByType[currentType] >= limit) {
-        throw new Error(
-          `Límite diario alcanzado para ${currentType}. No se pueden vender más unidades hoy.`
-        );
-      }
-    }
-
-
-
-    // 6) Capacidad por mesa con clave normalizada
-    if (params.dest.mode === "COMEDOR") {
-      const mesaK = tableKey(params.dest.table)!;
-      const ocupados =
-        (baseAgg?.comedor?.byTable?.[mesaK] ??
-          baseAgg?.comedor?.byTable?.[params.dest.table!] ??
-          0) as number;
-
-      const capacidad = tableCapacityFromKey(mesaK);
-
-      if (ocupados >= capacidad) {
-        throw new Error(
-          `Capacidad completa en ${tableLabelFromKey(mesaK)} (${capacidad}).`
-        );
-      }
-    }
-    // 7) Alta de venta
-    const saleRef = doc(db, "sales", crypto.randomUUID());
-    tx.set(saleRef, {
-      dateKey: key,
-      ts: serverTimestamp(),
-      seller: params.seller,
-      member: { id: params.memberId },
-      itemType: params.itemType,
-      destination: params.dest,
-      allowDouble: !!params.allowDouble,
-      voided: false,
-      voidReason: null,
-      voidedBy: null,
-    });
-
-    // 8) Índice socio/día
-    tx.set(indexRef, { count: increment(1), lastTs: serverTimestamp() }, { merge: true });
-
-    // 9) Calcular NUEVOS valores y escribirlos con update (números explícitos)
-    //    => evitamos cualquier rareza con increment/merge.
-    if (params.dest.mode === "COMEDOR") {
-      const totalTipoActual = (baseAgg?.comedor?.[params.itemType] ?? 0) as number;
-      const mesaK = tableKey(params.dest.table)!;
-      const mesaActual = (baseAgg?.comedor?.byTable?.[mesaK] ??
-        baseAgg?.comedor?.byTable?.[params.dest.table!] ??
-        0) as number;
-
-      const updates: any = {};
-      updates[`comedor.${params.itemType}`] = totalTipoActual + 1;
-      updates[`comedor.byTable.${mesaK}`] = mesaActual + 1;
-      tx.update(aggRef, updates);
-    } else {
-      const totalTipoActual = (baseAgg?.vianda?.[params.itemType] ?? 0) as number;
-      const updates: any = {};
-      updates[`vianda.${params.itemType}`] = totalTipoActual + 1;
-      tx.update(aggRef, updates);
-    }
+  // 6) Alta de venta (Escritura simple)
+  const saleRef = doc(db, "sales", crypto.randomUUID());
+  setDoc(saleRef, {
+    dateKey: key,
+    ts: serverTimestamp(),
+    seller: params.seller,
+    member: { id: params.memberId },
+    itemType: params.itemType,
+    destination: params.dest,
+    allowDouble: !!params.allowDouble,
+    voided: false,
+    voidReason: null,
+    voidedBy: null,
   });
+
+  // 7) Índice socio/día
+  setDoc(indexRef, { 
+    count: increment(1), 
+    lastTs: serverTimestamp() 
+  }, { merge: true });
+
+  // 8) Actualizar Agregados
+  const updates: any = { lastUpdated: serverTimestamp() };
+  const fld = params.dest.mode === "COMEDOR" ? "comedor" : "vianda";
+  
+  updates[`${fld}.${params.itemType}`] = increment(1);
+  
+  if (params.dest.mode === "COMEDOR") {
+    const mesaK = tableKey(params.dest.table)!;
+    updates[`comedor.byTable.${mesaK}`] = increment(1);
+  }
+
+  
 }
-
-
 // ---------- LISTADO EN VIVO (requiere índice: dateKey ASC + ts DESC) ----------
 export function listenTodaySales(setter: (rows: any[]) => void) {
   const q = query(

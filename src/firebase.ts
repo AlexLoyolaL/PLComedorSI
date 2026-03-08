@@ -1,6 +1,7 @@
 import { initializeApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+// NUEVO: Importamos las herramientas para el modo offline
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from "firebase/firestore";
 
 const cfg = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -25,4 +26,11 @@ assertEnv("VITE_FIREBASE_APP_ID", cfg.appId);
 export const app = initializeApp(cfg);
 export const auth = getAuth(app);
 export const provider = new GoogleAuthProvider();
-export const db = getFirestore(app);
+
+// NUEVO: Reemplazamos getFirestore() por la inicialización con soporte Offline
+export const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({
+    // Permite que si tienen varias pestañas abiertas, compartan la base de datos offline
+    tabManager: persistentMultipleTabManager() 
+  })
+});

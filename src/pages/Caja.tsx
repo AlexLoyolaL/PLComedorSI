@@ -77,6 +77,21 @@ export default function Caja() {
   const [searchSocio, setSearchSocio] = useState("");
   const [manualAdds, setManualAdds] = useState<any[]>([]);
 
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, []);
+
   useEffect(() => listenTodaySales(setRows), []);
 
   useEffect(() => {
@@ -180,6 +195,19 @@ export default function Caja() {
 
     return () => unsub();
   }, []);
+
+
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!isOnline) {
+        e.preventDefault();
+        e.returnValue = "Hay ventas pendientes de sincronizar. Si cierra la página ahora, se podrían perder datos. ¿Desea salir de todos modos?";
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [isOnline]);
 
   // Foco inicial en Socio
   useEffect(() => { socioRef.current?.focus(); }, []);
@@ -345,16 +373,40 @@ export default function Caja() {
   }
 
   return (
-    <div
-      style={{
-        display: "grid",
-        // El 1fr 2fr significa: dividí el espacio en 3, dale 1 tercio al primero y 2 tercios al segundo
-        gridTemplateColumns: "minmax(400px, 1fr) 2fr", 
-        gap: 16,
-      }}
-    >
-      {/* Columna izquierda: flujo de venta */}
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(400px, 1fr) 2fr", gap: 16 }}>
+      
+      {/* Columna Izquierda */}
       <div style={{ display: "grid", gap: 16 }}>
+        
+        {/* INDICADOR DE ESTADO */}
+        <div style={{ 
+          padding: '8px 12px', 
+          borderRadius: '8px', 
+          background: isOnline ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+          border: `1px solid ${isOnline ? '#22c55e' : '#ef4444'}`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10
+        }}>
+          <div style={{ 
+            width: 12, height: 12, borderRadius: '50%', 
+            background: isOnline ? '#22c55e' : '#ef4444',
+            boxShadow: isOnline ? '0 0 8px #22c55e' : '0 0 8px #ef4444'
+          }} />
+          <span style={{ fontWeight: 600, color: isOnline ? '#22c55e' : '#ef4444' }}>
+            {isOnline ? "SISTEMA ONLINE" : "SISTEMA OFFLINE (Modo de emergencia)"}
+          </span>
+        </div>
+
+        {/* ALERTA CRÍTICA SI ESTÁ OFFLINE */}
+        {!isOnline && (
+          <div style={{ 
+            background: '#ef4444', color: '#fff', padding: '12px', borderRadius: '8px', fontWeight: 700, textAlign: 'center' 
+          }}>
+            ⚠️ ATENCIÓN: No hay internet. Las ventas se guardan localmente. 
+            <br/> NO CIERRE LA PESTAÑA NI APAGUE LA PC hasta que vuelva el cartel verde.
+          </div>
+        )}
         {/* 1) Socio */}
         <Card title="1) Escanear carnet">
           <div style={{ display: "grid", gap: 8 }}>
