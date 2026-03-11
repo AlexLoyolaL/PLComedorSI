@@ -222,15 +222,19 @@ export async function createSaleTx(params: {
   }, { merge: true });
 
   // 8) Actualizar Agregados
-  const updates: any = { lastUpdated: serverTimestamp() };
-  const fld = params.dest.mode === "COMEDOR" ? "comedor" : "vianda";
-  
-  updates[`${fld}.${params.itemType}`] = increment(1);
+  const upd: any = { lastUpdated: serverTimestamp() };
   
   if (params.dest.mode === "COMEDOR") {
     const mesaK = tableKey(params.dest.table)!;
-    updates[`comedor.byTable.${mesaK}`] = increment(1);
+    upd.comedor = {
+      [params.itemType]: increment(1),
+      byTable: { [mesaK]: increment(1) }
+    };
+  } else {
+    upd.vianda = { [params.itemType]: increment(1) };
   }
+
+  setDoc(aggRef, upd, { merge: true });
 
   
 }
@@ -248,84 +252,101 @@ export function listenTodaySales(setter: (rows: any[]) => void) {
 }
 
 // ---------- ANULAR VENTA (VERSIÓN OFFLINE-READY) ----------
+// ---------- ANULAR VENTA (VERSIÓN OFFLINE-READY) ----------
 export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
   const key = todayKey();
   const saleRef = doc(db, "sales", id);
   const aggRef = doc(db, "dayAgg", key);
 
-  // Leemos la venta (si estamos offline, lee de la caché local para no explotar)
   const s = await getDoc(saleRef).catch(() => null);
   if (!s || !s.exists()) throw new Error("Venta no encontrada.");
   const sale: any = s.data();
 
-  if (!!sale.voided === voided) return; // Ya está en el estado deseado
+  if (!!sale.voided === voided) return;
 
   const sign = voided ? -1 : 1;
-  const fld = sale.destination.mode === "COMEDOR" ? "comedor" : "vianda";
-
-  // 1) Actualizar agregados (Usamos setDoc con merge para EVITAR el error de "No document to update")
   const upd: any = { lastUpdated: serverTimestamp() };
-  upd[`${fld}.${sale.itemType}`] = increment(sign);
 
-  if (sale.destination.mode === "COMEDOR" && sale.destination.table) {
-    const oldK = tableKey(sale.destination.table)!;
-    upd[`comedor.byTable.${oldK}`] = increment(sign);
+  // Armamos la estructura anidada para anular
+  if (sale.destination.mode === "COMEDOR") {
+    upd.comedor = { [sale.itemType]: increment(sign) };
+    if (sale.destination.table) {
+      const oldK = tableKey(sale.destination.table)!;
+      upd.comedor.byTable = { [oldK]: increment(sign) };
+    }
+  } else {
+    upd.vianda = { [sale.itemType]: increment(sign) };
   }
 
-  // 2) Disparamos los guardados sin await (Fire and forget)
   setDoc(aggRef, upd, { merge: true });
   setDoc(saleRef, { voided, voidReason: reason ?? null, updatedAt: serverTimestamp() }, { merge: true });
 }
 
 // ---------- EDITAR VENTA (VERSIÓN OFFLINE-READY) ----------
-export async function updateSaleTx(params: {
-  saleId: string;
-  newItemType: ItemType;
-  newDest: Destination;
-}) {
+// ---------- EDITAR VENTA (VERSIÓN OFFLINE-READY) ----------
+export async function updateSaleTx(params: { saleId: string; newItemType: ItemType; newDest: Destination; }) {
   const key = todayKey();
   const saleRef = doc(db, "sales", params.saleId);
   const aggRef = doc(db, "dayAgg", key);
 
-  // 1) Venta actual
   const s = await getDoc(saleRef).catch(() => null);
   if (!s || !s.exists()) throw new Error("Venta no encontrada");
   const sale: any = s.data();
   if (sale.voided) throw new Error("No se puede editar una venta anulada");
 
-  // Validar nuevo destino/mesa (local)
   if (params.newDest.mode === "COMEDOR") {
     if (!params.newDest.table) throw new Error("Mesa obligatoria en COMEDOR");
-    if (!mesaOk(params.newItemType, params.newDest.table)) {
-      throw new Error("Mesa no corresponde al tipo (01–21 MENU, 22–23 VEGGIE).");
-    }
+    if (!mesaOk(params.newItemType, params.newDest.table)) throw new Error("Mesa inválida.");
   }
 
-  // 2) Restar agregados actuales
-  const oldFld = sale.destination.mode === "COMEDOR" ? "comedor" : "vianda";
+  // Calculamos la diferencia neta para no pisar datos
+  const diffComedor: any = {};
+  const diffVianda: any = {};
+  const diffTables: any = {};
+
+  // Restar lo viejo
+  if (sale.destination.mode === "COMEDOR") {
+    diffComedor[sale.itemType] = -1;
+    if (sale.destination.table) diffTables[tableKey(sale.destination.table)!] = -1;
+  } else {
+    diffVianda[sale.itemType] = -1;
+  }
+
+  // Sumar lo nuevo
+  if (params.newDest.mode === "COMEDOR") {
+    diffComedor[params.newItemType] = (diffComedor[params.newItemType] || 0) + 1;
+    if (params.newDest.table) diffTables[tableKey(params.newDest.table)!] = (diffTables[tableKey(params.newDest.table)!] || 0) + 1;
+  } else {
+    diffVianda[params.newItemType] = (diffVianda[params.newItemType] || 0) + 1;
+  }
+
+  // Construir el objeto anidado limpio
   const upd: any = { lastUpdated: serverTimestamp() };
 
-  upd[`${oldFld}.${sale.itemType}`] = increment(-1);
-  if (sale.destination.mode === "COMEDOR" && sale.destination.table) {
-    const oldK = tableKey(sale.destination.table)!;
-    upd[`comedor.byTable.${oldK}`] = increment(-1);
-  }
+  Object.keys(diffComedor).forEach(k => {
+    if (diffComedor[k] !== 0) {
+      if (!upd.comedor) upd.comedor = {};
+      upd.comedor[k] = increment(diffComedor[k]);
+    }
+  });
 
-  // 3) Sumar agregados nuevos
-  const newFld = params.newDest.mode === "COMEDOR" ? "comedor" : "vianda";
-  upd[`${newFld}.${params.newItemType}`] = increment(1);
-  if (params.newDest.mode === "COMEDOR" && params.newDest.table) {
-    const newK = tableKey(params.newDest.table)!;
-    upd[`comedor.byTable.${newK}`] = increment(1);
-  }
+  Object.keys(diffVianda).forEach(k => {
+    if (diffVianda[k] !== 0) {
+      if (!upd.vianda) upd.vianda = {};
+      upd.vianda[k] = increment(diffVianda[k]);
+    }
+  });
 
-  // 4) Ejecutar actualizaciones (Fire and forget, con merge para evitar el crash rojo)
+  Object.keys(diffTables).forEach(k => {
+    if (diffTables[k] !== 0) {
+      if (!upd.comedor) upd.comedor = {};
+      if (!upd.comedor.byTable) upd.comedor.byTable = {};
+      upd.comedor.byTable[k] = increment(diffTables[k]);
+    }
+  });
+
   setDoc(aggRef, upd, { merge: true });
-  setDoc(saleRef, {
-    itemType: params.newItemType,
-    destination: params.newDest,
-    updatedAt: serverTimestamp(),
-  }, { merge: true });
+  setDoc(saleRef, { itemType: params.newItemType, destination: params.newDest, updatedAt: serverTimestamp() }, { merge: true });
 }
 
 // ---------- (OPCIONAL) Reconstruir agregado del día desde sales ----------
