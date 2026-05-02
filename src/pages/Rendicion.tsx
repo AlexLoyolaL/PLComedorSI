@@ -28,11 +28,11 @@ const RendicionBlock: React.FC<BlockProps> = ({
   totalCeliacoCaja,
   showSaveButton
 }) => {
-  const [valorMenu, setValorMenu] = useState<number>(4000);
-  const [valorVeggie, setValorVeggie] = useState<number>(4000);
-  const [valorCeliaco, setValorCeliaco] = useState<number>(4000);
-  const [valorAcompMenu, setValorAcompMenu] = useState<number>(4000);
-  const [valorAcompVeggie, setValorAcompVeggie] = useState<number>(4000);
+  const [valorMenu, setValorMenu] = useState<number>(2500);
+  const [valorVeggie, setValorVeggie] = useState<number>(2500);
+  const [valorCeliaco, setValorCeliaco] = useState<number>(2500);
+  const [valorAcompMenu, setValorAcompMenu] = useState<number>(2500);
+  const [valorAcompVeggie, setValorAcompVeggie] = useState<number>(2500);
   const [valorMp, setValorMp] = useState<number>(2500);
 
   const [manual, setManual] = useState<ValoresManual>({
