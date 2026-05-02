@@ -10,7 +10,7 @@ import {
   updateSaleTx,
 } from "../lib/sales";
 import { Card } from "../ui/Card";
-import { doc, onSnapshot, collection } from "firebase/firestore";
+import { doc, onSnapshot, collection, getDoc } from "firebase/firestore"; // NUEVO: Importamos getDoc
 import { db } from "../firebase";
 
 type Row = {
@@ -22,7 +22,8 @@ type Row = {
   destination: { mode: "COMEDOR" | "VIANDA"; table: string | null };
   allowDouble: boolean;
   voided: boolean;
-  manual?: boolean;          // <- NUEVO: marca cargas desde AdminViandas
+  manual?: boolean;
+  isSubsidized?: boolean; // NUEVO: Para saber si dibujamos el regalito en la tabla
 };
 
 type OrderData = {
@@ -30,7 +31,6 @@ type OrderData = {
   dest: { mode: "COMEDOR" | "VIANDA"; table: string | null };
 };
 
-// Helper: el lector USB suele mandar \r o \n al final
 function hasEnter(s: string) {
   return /\r|\n/.test(s);
 }
@@ -38,7 +38,6 @@ function hasEnter(s: string) {
 export default function Caja() {
   const { user } = useAuth();
 
-  // Inputs crudos (lo que "tipea" el lector)
   const [memberInput, setMemberInput] = useState("");
   const [orderInput, setOrderInput] = useState("");
 
@@ -52,15 +51,15 @@ export default function Caja() {
     CELIACO: null,
   });
 
-  // Datos parseados
   const [memberId, setMemberId] = useState("");
   const [order, setOrder] = useState<OrderData | null>(null);
+  
+  // NUEVO: Estado para mostrar el cartel de subvencionado
+  const [isSubsidized, setIsSubsidized] = useState(false);
 
-  // --- NUEVO: Control de carga y bloqueos de tiempo ---
   const [isLoading, setIsLoading] = useState(false);
   const lastScansRef = useRef<Map<string, number>>(new Map());
 
-  // Duplicado: solo mostramos si hace falta
   const [dupInfo, setDupInfo] = useState<{ needed: boolean; message: string }>(
     { needed: false, message: "" }
   );
@@ -72,7 +71,6 @@ export default function Caja() {
 
   const ready = useMemo(() => !!memberId && !!order, [memberId, order]);
 
-  // Listado en vivo
   const [rows, setRows] = useState<Row[]>([]);
   const [searchSocio, setSearchSocio] = useState("");
   const [manualAdds, setManualAdds] = useState<any[]>([]);
@@ -108,7 +106,6 @@ export default function Caja() {
   }, []);
 
   const filteredRows = useMemo(() => {
-    // siempre escondemos las ventas manuales
     const base = rows.filter((r) => !r.manual);
 
     const q = searchSocio.trim().toLowerCase();
@@ -124,7 +121,6 @@ export default function Caja() {
     () =>
       rows.reduce(
         (acc, r) => {
-          // solo contamos ventas reales de Caja (no manuales)
           if (!r.voided && !r.manual) {
             if (
               r.itemType === "MENU" ||
@@ -172,12 +168,9 @@ export default function Caja() {
   };
 
   const remainingViandas: Record<"MENU" | "VEGGIE" | "CELIACO", number | null> = {
-    MENU:
-      limits.MENU != null ? Math.max(limits.MENU - totalUsadas.MENU, 0) : null,
-    VEGGIE:
-      limits.VEGGIE != null ? Math.max(limits.VEGGIE - totalUsadas.VEGGIE, 0) : null,
-    CELIACO:
-      limits.CELIACO != null ? Math.max(limits.CELIACO - totalUsadas.CELIACO, 0) : null,
+    MENU: limits.MENU != null ? Math.max(limits.MENU - totalUsadas.MENU, 0) : null,
+    VEGGIE: limits.VEGGIE != null ? Math.max(limits.VEGGIE - totalUsadas.VEGGIE, 0) : null,
+    CELIACO: limits.CELIACO != null ? Math.max(limits.CELIACO - totalUsadas.CELIACO, 0) : null,
   };
 
   useEffect(() => {
@@ -196,7 +189,6 @@ export default function Caja() {
     return () => unsub();
   }, []);
 
-
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (!isOnline) {
@@ -209,10 +201,8 @@ export default function Caja() {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [isOnline]);
 
-  // Foco inicial en Socio
   useEffect(() => { socioRef.current?.focus(); }, []);
 
-  // Sonidos (éxito / error)
   function beep(ok = true) {
     try {
       const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
@@ -224,34 +214,51 @@ export default function Caja() {
     } catch {}
   }
 
-  // Paso 1: Socio
-  function handleSocioEnter() {
+  // Modificamos la función para que reciba el texto exacto escaneado
+  async function handleSocioEnter(scannedText: string) {
+    // Si el texto está vacío (un Enter accidental), ignoramos
+    if (!scannedText || scannedText.trim() === "") return;
+
     try {
-      const { memberId } = parseMemberQR(memberInput);
-      setMemberId(memberId);
+      const { memberId } = parseMemberQR(scannedText);
+      
+      // EL SEGURO: Si la lógica no pudo extraer un ID válido, cortamos acá
+      if (!memberId || memberId.trim() === "") {
+        setMsg("No se detectó un ID válido en el carnet.");
+        beep(false);
+        return;
+      }
+
+      setMemberId(memberId); // Guardamos para la UI
       setMsg("");
+
+      // Ahora sí, con un ID 100% seguro y garantizado, buscamos en Firebase
+      try {
+        const subSnap = await getDoc(doc(db, "subsidized_members", memberId));
+        setIsSubsidized(subSnap.exists() && subSnap.data()?.active === true);
+      } catch (e) {
+        setIsSubsidized(false); // Falla silenciosa si no hay internet
+      }
+
       pedidoRef.current?.focus();
       pedidoRef.current?.select?.();
     } catch (e: any) {
       setMsg(e.message); beep(false);
+      setIsSubsidized(false);
     }
   }
 
-  // Paso 2: Pedido (parsea y confirma)
   function handlePedidoEnter() {
     try {
       const p = parseOrderQR(orderInput);
       setOrder(p);
       setMsg("");
-
-      // Usamos el pedido recién leído para confirmar de una
-      confirmIfReady(false, p); // auto-confirmar
+      confirmIfReady(false, p);
     } catch (e: any) {
       setMsg(e.message); beep(false);
     }
   }
 
-  // Confirmar venta
   async function confirmIfReady(
     allowDouble: boolean,
     orderOverride?: {
@@ -259,7 +266,7 @@ export default function Caja() {
       dest: { mode: "COMEDOR" | "VIANDA"; table: string | null };
     }
   ) {
-    if (isLoading) return; // Evita el "clic-clic-clic" desesperado
+    if (isLoading) return;
 
     const currentOrder = orderOverride ?? order;
 
@@ -267,11 +274,9 @@ export default function Caja() {
     setMsg("");
     setDupInfo({ needed: false, message: "" });
 
-    // --- NUEVO: Validación local de 30 segundos ---
     const now = Date.now();
     const lastScanTime = lastScansRef.current.get(memberId) || 0;
     
-    // Si no estamos forzando (allowDouble) y pasaron menos de 30 segundos (30000ms)
     if (!allowDouble && (now - lastScanTime < 30000)) {
       setDupInfo({
         needed: true,
@@ -281,7 +286,6 @@ export default function Caja() {
       return; 
     }
 
-    // Validación de límite de VIANDAS por tipo
     if (currentOrder.dest.mode === "VIANDA") {
       const tipo = currentOrder.itemType; 
       const limit = limits[tipo];
@@ -294,7 +298,7 @@ export default function Caja() {
       }
     }
 
-    setIsLoading(true); // Bloqueamos la UI
+    setIsLoading(true);
 
     try {
       await ensureDaySettings();
@@ -306,15 +310,16 @@ export default function Caja() {
         allowDouble,
       });
 
-      // --- NUEVO: Registramos la hora del éxito para este socio ---
       lastScansRef.current.set(memberId, Date.now());
 
       beep(true);
-      // limpiar y volver a socio
+      // NUEVO: Limpiamos todo, incluyendo el cartel de subvención
       setMemberInput("");
       setOrderInput("");
       setMemberId("");
       setOrder(null);
+      setIsSubsidized(false);
+      
       setTimeout(() => {
         if (socioRef.current) {
           socioRef.current.focus();
@@ -329,11 +334,10 @@ export default function Caja() {
       }
       beep(false);
     } finally {
-      setIsLoading(false); // Liberamos la UI pase lo que pase
+      setIsLoading(false);
     }
   }
 
-  // Atajo F2 para confirmar con doble compra cuando aparece el banner
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (dupInfo.needed && e.key === "F2") {
@@ -342,9 +346,8 @@ export default function Caja() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dupInfo.needed, memberId, order, isLoading]); // Agregué isLoading a las dependencias por las dudas
+  }, [dupInfo.needed, memberId, order, isLoading]);
 
-  // Listado: acciones
   async function anular(id: string) {
     try { await voidSaleTx(id, true, "Anulada por administrativo"); }
     catch (e: any) { setMsg(e.message || String(e)); }
@@ -375,10 +378,8 @@ export default function Caja() {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "minmax(400px, 1fr) 2fr", gap: 16 }}>
       
-      {/* Columna Izquierda */}
       <div style={{ display: "grid", gap: 16 }}>
         
-        {/* INDICADOR DE ESTADO */}
         <div style={{ 
           padding: '8px 12px', 
           borderRadius: '8px', 
@@ -398,7 +399,6 @@ export default function Caja() {
           </span>
         </div>
 
-        {/* ALERTA CRÍTICA SI ESTÁ OFFLINE */}
         {!isOnline && (
           <div style={{ 
             background: '#ef4444', color: '#fff', padding: '12px', borderRadius: '8px', fontWeight: 700, textAlign: 'center' 
@@ -407,7 +407,7 @@ export default function Caja() {
             <br/> NO CIERRE LA PESTAÑA NI APAGUE LA PC hasta que vuelva el cartel verde.
           </div>
         )}
-        {/* 1) Socio */}
+
         <Card title="1) Escanear carnet">
           <div style={{ display: "grid", gap: 8 }}>
             <input
@@ -422,21 +422,33 @@ export default function Caja() {
                 if (hasEnter(v)) {
                   const clean = v.replace(/[\r\n]+/g, " ").trim();
                   setMemberInput(clean);
-                  handleSocioEnter();
+                  // Le pasamos el texto limpio DIRECTO, sin esperar a React
+                  handleSocioEnter(clean); 
                 }
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === "NumpadEnter") {
                   e.preventDefault();
-                  handleSocioEnter();
+                  // Si apretan Enter manual
+                  handleSocioEnter(memberInput); 
                 }
               }}
             />
-            <div>Socio: <b>{memberId || "-"}</b></div>
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              Socio: <b>{memberId || "-"}</b>
+              {/* NUEVO: Cartelito Azul Inconfundible */}
+              {isSubsidized && (
+                <span style={{ 
+                  marginLeft: 12, background: '#3b82f6', color: '#fff', 
+                  padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 'bold' 
+                }}>
+                  🎁 SUBVENCIONADO
+                </span>
+              )}
+            </div>
           </div>
         </Card>
 
-        {/* 2) Pedido */}
         <Card title="2) Escanear pedido (comida + destino)">
           <div style={{ display: "grid", gap: 8 }}>
             <input
@@ -451,13 +463,13 @@ export default function Caja() {
                 if (hasEnter(v)) {
                   const clean = v.replace(/[\r\n]+/g, " ").trim();
                   setOrderInput(clean);
-                  handlePedidoEnter(); // parsea y confirma
+                  handlePedidoEnter(); 
                 }
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === "NumpadEnter") {
                   e.preventDefault();
-                  handlePedidoEnter(); // un solo Enter confirma
+                  handlePedidoEnter(); 
                 }
               }}
             />
@@ -474,7 +486,6 @@ export default function Caja() {
           </div>
         </Card>
 
-        {/* 3) Confirmar */}
         <Card
           title="3) Confirmar"
           right={<span style={{ color: "#9aa4c0" }}>Enter en “Pedido” confirma.</span>}
@@ -507,7 +518,6 @@ export default function Caja() {
                   disabled={isLoading}
                   onClick={() => {
                     setDupInfo({ needed: false, message: "" });
-                    // Devolvemos el foco al carnet para que siga trabajando
                     setTimeout(() => socioRef.current?.focus(), 50);
                   }}
                 >
@@ -537,6 +547,7 @@ export default function Caja() {
                 setOrderInput("");
                 setMemberId("");
                 setOrder(null);
+                setIsSubsidized(false); // NUEVO: Se limpia si tocan Cancelar
                 setMsg("");
                 setDupInfo({ needed: false, message: "" });
                 socioRef.current?.focus();
@@ -557,7 +568,6 @@ export default function Caja() {
         </Card>
       </div>
 
-      {/* Columna derecha: resumen (sticky) */}
       <div
         style={{
           position: "sticky",
@@ -568,7 +578,6 @@ export default function Caja() {
           gap: 8,
         }}
       >
-        {/* Contador de viandas bien compacto */}
         <Card title="Ventas">
           <div
             style={{
@@ -576,7 +585,7 @@ export default function Caja() {
               justifyContent: "space-between",
               alignItems: "center",
               fontSize: 12,
-              fontWeight: 600, // para las etiquetas en negrita
+              fontWeight: 600, 
               textAlign: "center",
             }}
           >
@@ -647,7 +656,13 @@ export default function Caja() {
                 {filteredRows.map((r) => (
                   <tr key={r.id} style={{ opacity: r.voided ? 0.5 : 1 }}>
                     <td>{r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : ""}</td>
-                    <td>{r.member?.id}</td>
+                    <td>
+                      {r.member?.id}
+                      {/* NUEVO: Iconito de regalo en la tabla para los subvencionados */}
+                      {r.isSubsidized && (
+                        <span title="Subvencionado" style={{ marginLeft: 6, fontSize: 12 }}>🎁</span>
+                      )}
+                    </td>
                     <td>{r.itemType}</td>
                     <td>{r.destination?.mode}</td>
                     <td>{r.destination?.table ?? "-"}</td>

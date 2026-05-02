@@ -1,12 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { doc, onSnapshot, setDoc, collection } from "firebase/firestore";
 import { db } from "../firebase";
 import { Card } from "../ui/Card";
 import { addManualViandas, todayKey, listenTodaySales } from "../lib/sales";
 import { useAuth } from "../state/AuthContext";
-import RequireRole from "../components/RequireRole"; // el que permite allowAny
+import RequireRole from "../components/RequireRole";
 import type { ViandaConcept } from "../lib/sales";
-
 
 type Row = {
   id: string;
@@ -20,11 +19,10 @@ type Row = {
   manual?: boolean; // ← ventas generadas desde AdminViandas
 };
 
-
-
 export default function AdminViandasPage() {
   return (
-    <RequireRole allowAny={["admin"]}>
+    // SOLUCIÓN DE PERMISOS: Agregamos "administrador" y "root" para alinear con AuthContext
+    <RequireRole allowAny={["administrador", "root"]}>
       <AdminViandasInner />
     </RequireRole>
   );
@@ -33,20 +31,13 @@ export default function AdminViandasPage() {
 function AdminViandasInner() {
   const { user } = useAuth();
 
-  // NUEVOS estados que faltaban
   const [qty, setQty] = useState<number>(1);
   const [concept, setConcept] = useState<ViandaConcept>("PERSONAL");
-
   const [itemType, setItemType] = useState<"MENU" | "VEGGIE" | "CELIACO">("MENU");
   const [note, setNote] = useState("");
   const [msg, setMsg] = useState<string>("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
-  // Mostrar totales y desglose actual (en vivo)
-  const [extra, setExtra] = useState<{ total: number; breakdown: Record<string, number> }>({
-    total: 0,
-    breakdown: {},
-  });
   
   const [limits, setLimits] = useState<{
     MENU: number | null;
@@ -58,14 +49,7 @@ function AdminViandasInner() {
     CELIACO: null,
   });
 
-  const [totalMenu, setTotalMenu] = useState<number>(0);
-  const [totalVeggie, setTotalVeggie] = useState<number>(0);
-  const [totalCeliaco, setTotalCeliaco] = useState<number>(0);
-
-
   const [manualAdds, setManualAdds] = useState<any[]>([]);
-
-  
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "adminAdds"), (snap) => {
@@ -105,48 +89,33 @@ function AdminViandasInner() {
     return () => unsub();
   }, []);
 
-    // Totales por tipo: ventas del día + cargas manuales
-    // Totales por tipo: ventas del día (solo Caja) + cargas manuales
-  useEffect(() => {
-    let tm = 0,
-      tv = 0,
-      tc = 0;
+  // OPTIMIZACIÓN DE RENDIMIENTO: Calculamos el balance al vuelo con useMemo
+  const { totalMenu, totalVeggie, totalCeliaco } = useMemo(() => {
+    let tm = 0, tv = 0, tc = 0;
 
     // 1) Ventas "normales" (Caja) → excluimos las ventas manuales
     for (const r of rows as Row[]) {
       if (r.voided) continue;
       if (r.manual) continue; // estas ya se cuentan en adminAdds
 
-      if (r.itemType === "MENU") {
-        tm += 1;
-      } else if (r.itemType === "VEGGIE") {
-        tv += 1;
-      } else if (r.itemType === "CELIACO") {
-        tc += 1;
-      }
+      if (r.itemType === "MENU") tm += 1;
+      else if (r.itemType === "VEGGIE") tv += 1;
+      else if (r.itemType === "CELIACO") tc += 1;
     }
 
     // 2) Cargas manuales (adminAdds)
     for (const r of manualAdds) {
       const q = Number(r.qty) || 0;
-      if (r.itemType === "MENU") {
-        tm += q;
-      } else if (r.itemType === "VEGGIE") {
-        tv += q;
-      } else if (r.itemType === "CELIACO") {
-        tc += q;
-      }
+      if (r.itemType === "MENU") tm += q;
+      else if (r.itemType === "VEGGIE") tv += q;
+      else if (r.itemType === "CELIACO") tc += q;
     }
 
-    setTotalMenu(tm);
-    setTotalVeggie(tv);
-    setTotalCeliaco(tc);
+    return { totalMenu: tm, totalVeggie: tv, totalCeliaco: tc };
   }, [rows, manualAdds]);
 
-
-
-    // Resumen "Cargas manuales" (Total extra + breakdown)
-  useEffect(() => {
+  // OPTIMIZACIÓN DE RENDIMIENTO: Calculamos el breakdown al vuelo con useMemo
+  const extra = useMemo(() => {
     const breakdown: Record<string, number> = {};
     let total = 0;
 
@@ -157,8 +126,9 @@ function AdminViandasInner() {
       total += qty;
     }
 
-    setExtra({ total, breakdown });
+    return { total, breakdown };
   }, [manualAdds]);
+
 
   function handleLimitChange(
     type: "MENU" | "VEGGIE" | "CELIACO",
@@ -176,7 +146,6 @@ function AdminViandasInner() {
     setDoc(ref, { limits: newLimits }, { merge: true });
   }
 
-  // IMPORTANTE: el nombre tiene que coincidir con el botón (handleManualAdd)
   async function handleManualAdd() {
     if (!user) return;
     const q = Number(qty);
@@ -349,6 +318,7 @@ function AdminViandasInner() {
           </div>
         )}
       </Card>
+      
       <Card title="Límites diarios por tipo">
         <div className="panel">
           {/* MENU */}
@@ -428,10 +398,7 @@ function AdminViandasInner() {
         </div>
       </Card>
 
-
       <Card title={`Resumen hoy ${todayKey()}`}>
-        
-
         <div className="panel" style={{ marginTop: 12 }}>
           <div style={{ fontWeight: 700, marginBottom: 6 }}>Cargas manuales</div>
           <div>
@@ -488,7 +455,6 @@ function AdminViandasInner() {
                     </tr>
                   ))}
                 </tbody>
-
               </table>
             </>
           )}
@@ -496,4 +462,4 @@ function AdminViandasInner() {
       </Card> 
     </div>
   );
-}   
+}

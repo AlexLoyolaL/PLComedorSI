@@ -25,7 +25,6 @@ dayjs.extend(timezone);
 
 const TZ = "America/Argentina/Buenos_Aires";
 
-
 // Capacidad por mesa
 export function tableCapacityFromKey(key: string): number {
   const n = parseInt(String(key).replace(/[^\d]/g, ""), 10);
@@ -36,7 +35,6 @@ export function tableCapacityFromKey(key: string): number {
   }
   return 9;   // resto de mesas
 }
-
 
 /** Clave de día (TZ AR) */
 export const todayKey = () => dayjs().tz(TZ).format("YYYY-MM-DD");
@@ -49,6 +47,7 @@ export function tableKey(table?: string | null) {
   if (!n) return null;
   return "M" + n.padStart(2, "0");
 }
+
 /** A partir de "M01" devuelve "MESA 01" */
 export function tableLabelFromKey(key: string) {
   const n = key.replace(/[^\d]/g, "");
@@ -91,7 +90,7 @@ export async function ensureDaySettings() {
   // Si no existe, lo crea desde cero
   const tables: Record<string, number> = {};
 
-// Mesas 1–23 → 9 lugares
+  // Mesas 1–23 → 9 lugares
   for (let i = 1; i <= 23; i++) {
     tables[`MESA ${String(i).padStart(2, "0")}`] = 9;
   }
@@ -113,7 +112,7 @@ export async function ensureDaySettings() {
   });
 }
 
-
+/*
 function afterCutoff(mode: "COMEDOR" | "VIANDA", settings: any) {
   const now = dayjs().tz(TZ);
   const hhmm = mode === "COMEDOR" ? settings.cutoffs.comedor : settings.cutoffs.vianda;
@@ -121,8 +120,9 @@ function afterCutoff(mode: "COMEDOR" | "VIANDA", settings: any) {
   const limit = now.hour(hh).minute(mm).second(0).millisecond(0);
   return now.isAfter(limit);
 }
+*/
 
-// ---------- ALTA DE VENTA (VERSIÓN OFFLINE-READY BLINDADA) ----------
+// ---------- ALTA DE VENTA (VERSIÓN OFFLINE-READY + SUBVENCIONADOS) ----------
 export async function createSaleTx(params: {
   seller: { uid: string; email: string; name: string };
   memberId: string;
@@ -134,6 +134,9 @@ export async function createSaleTx(params: {
   const settingsRef = doc(db, "settings_day", key);
   const aggRef = doc(db, "dayAgg", key);
   const indexRef = doc(db, "membersDayIndex", `${key}_${params.memberId}`);
+  
+  // ¡AQUÍ ESTÁ LA VARIABLE CLAVE PARA EL GABINETE!
+  const subRef = doc(db, "subsidized_members", params.memberId);
 
   // Función auxiliar para leer documentos sin que explote estando offline
   async function getOfflineSafe(ref: any) {
@@ -142,24 +145,23 @@ export async function createSaleTx(params: {
       return snap;
     } catch (e: any) {
       if (e.message?.toLowerCase().includes("offline") || e.code === "unavailable") {
-        return { exists: () => false, data: () => ({}) }; // Finge que no existe si estamos sin internet
+        return { exists: () => false, data: () => ({}) }; // Finge que no existe
       }
       throw e;
     }
   }
 
   // 1) Obtenemos settings de manera segura
-// 1) Obtenemos settings de manera segura
   const st = await getOfflineSafe(settingsRef);
   const settings = (st.exists() ? st.data() : {}) as any;
 
-  // 2) Cortes horarios (Comentado para pruebas nocturnas)
-  
+  // 2) Cortes horarios (Comentado para pruebas nocturnas, podés descomentarlo después)
+  /*
   if (settings.cutoffs && afterCutoff(params.dest.mode, settings)) {
     const horaCorte = params.dest.mode === "COMEDOR" ? settings.cutoffs.comedor : settings.cutoffs.vianda;
     throw new Error(`El horario para ${params.dest.mode.toLowerCase()} finalizó a las ${horaCorte} hs.`);
   }
-  
+  */
 
   // 3) Validaciones de mesa/tipo
   if (params.dest.mode === "COMEDOR") {
@@ -176,7 +178,17 @@ export async function createSaleTx(params: {
     throw new Error("Socio ya tiene una compra hoy. Habilitar doble compra para continuar.");
   }
 
-  // 5) Validación de límites diarios (Seguro offline)
+  // 5) Chequear subsidio y VENCIMIENTO (Seguro offline)
+  const subSnap = await getOfflineSafe(subRef);
+  const subData = subSnap.exists() ? (subSnap.data() as any) : null;
+  
+  const now = dayjs();
+  const expiresAt = subData?.expiresAt ? dayjs(subData.expiresAt.toDate()) : null;
+  
+  // Es subvencionado si está activo y (no tiene fecha O la fecha es mayor a hoy)
+  const isSubsidized = subData?.active === true && (!expiresAt || now.isBefore(expiresAt));
+
+  // 6) Validación de límites diarios (Seguro offline)
   const aggSnap = await getOfflineSafe(aggRef);
   const baseAgg = aggSnap.exists() ? (aggSnap.data() as any) : {
     comedor: { MENU: 0, VEGGIE: 0, CELIACO: 0 },
@@ -200,7 +212,7 @@ export async function createSaleTx(params: {
     throw new Error(`Límite diario alcanzado para ${params.itemType}.`);
   }
 
-  // 6) Alta de venta (Escritura simple)
+  // 7) Alta de venta (Escritura simple)
   const saleRef = doc(db, "sales", crypto.randomUUID());
   setDoc(saleRef, {
     dateKey: key,
@@ -210,18 +222,24 @@ export async function createSaleTx(params: {
     itemType: params.itemType,
     destination: params.dest,
     allowDouble: !!params.allowDouble,
+    isSubsidized, // <-- MARCAMOS LA VENTA COMO SUBVENCIONADA
     voided: false,
     voidReason: null,
     voidedBy: null,
   });
 
-  // 7) Índice socio/día
+  // 8) Sumar retiro si es subvencionado al contador de Gabinete
+  if (isSubsidized) {
+    setDoc(subRef, { totalWithdrawals: increment(1) }, { merge: true });
+  }
+
+  // 9) Índice socio/día
   setDoc(indexRef, { 
     count: increment(1), 
     lastTs: serverTimestamp() 
   }, { merge: true });
 
-  // 8) Actualizar Agregados
+  // 10) Actualizar Agregados de Cocina
   const upd: any = { lastUpdated: serverTimestamp() };
   
   if (params.dest.mode === "COMEDOR") {
@@ -234,11 +252,16 @@ export async function createSaleTx(params: {
     upd.vianda = { [params.itemType]: increment(1) };
   }
 
-  setDoc(aggRef, upd, { merge: true });
+  // NUEVO: Agregación Financiera para Auditoría
+  upd.financial = {
+    paid: increment(isSubsidized ? 0 : 1),
+    subsidized: increment(isSubsidized ? 1 : 0)
+  };
 
-  
+  setDoc(aggRef, upd, { merge: true });
 }
-// ---------- LISTADO EN VIVO (requiere índice: dateKey ASC + ts DESC) ----------
+
+// ---------- LISTADO EN VIVO ----------
 export function listenTodaySales(setter: (rows: any[]) => void) {
   const q = query(
     collection(db, "sales"),
@@ -251,7 +274,6 @@ export function listenTodaySales(setter: (rows: any[]) => void) {
   });
 }
 
-// ---------- ANULAR VENTA (VERSIÓN OFFLINE-READY) ----------
 // ---------- ANULAR VENTA (VERSIÓN OFFLINE-READY) ----------
 export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
   const key = todayKey();
@@ -278,11 +300,22 @@ export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
     upd.vianda = { [sale.itemType]: increment(sign) };
   }
 
+  // NUEVO: Ajuste Financiero
+  upd.financial = {
+    paid: increment(sale.isSubsidized ? 0 : sign),
+    subsidized: increment(sale.isSubsidized ? sign : 0)
+  };
+
   setDoc(aggRef, upd, { merge: true });
   setDoc(saleRef, { voided, voidReason: reason ?? null, updatedAt: serverTimestamp() }, { merge: true });
+
+  // Si anulamos una venta subvencionada, restamos el contador del Gabinete
+  if (sale.isSubsidized) {
+    const subRef = doc(db, "subsidized_members", sale.member.id);
+    setDoc(subRef, { totalWithdrawals: increment(sign) }, { merge: true });
+  }
 }
 
-// ---------- EDITAR VENTA (VERSIÓN OFFLINE-READY) ----------
 // ---------- EDITAR VENTA (VERSIÓN OFFLINE-READY) ----------
 export async function updateSaleTx(params: { saleId: string; newItemType: ItemType; newDest: Destination; }) {
   const key = todayKey();
@@ -349,7 +382,7 @@ export async function updateSaleTx(params: { saleId: string; newItemType: ItemTy
   setDoc(saleRef, { itemType: params.newItemType, destination: params.newDest, updatedAt: serverTimestamp() }, { merge: true });
 }
 
-// ---------- (OPCIONAL) Reconstruir agregado del día desde sales ----------
+// ---------- Reconstruir agregado del día desde sales ----------
 export async function rebuildTodayAggFromSales() {
   const key = todayKey();
   const q = query(collection(db, "sales"), where("dateKey", "==", key));
@@ -367,36 +400,42 @@ export async function rebuildTodayAggFromSales() {
       VEGGIE: 0,
       CELIACO: 0,
     },
+    financial: { paid: 0, subsidized: 0 } // NUEVO
   };
 
   snap.forEach((d) => {
     const r: any = d.data();
     if (r.voided) return;
 
-    const type = r.itemType as ItemType; // ahora usa ItemType completo
+    const type = r.itemType as ItemType; 
     const mode = r.destination?.mode as "COMEDOR" | "VIANDA" | undefined;
 
     if (!type || !mode) return;
 
     if (mode === "COMEDOR") {
-      // sumo por tipo (incluye CELIACO)
       agg.comedor[type] = (agg.comedor[type] ?? 0) + 1;
 
       const key = tableKey(r.destination?.table);
       if (key) {
-        agg.comedor.byTable[key] =
-          (agg.comedor.byTable[key] ?? 0) + 1;
+        agg.comedor.byTable[key] = (agg.comedor.byTable[key] ?? 0) + 1;
       }
     } else if (mode === "VIANDA") {
       agg.vianda[type] = (agg.vianda[type] ?? 0) + 1;
     }
+
+    // NUEVO: Reconstruir finanzas
+    if (r.isSubsidized) {
+      agg.financial.subsidized += 1;
+    } else {
+      agg.financial.paid += 1;
+    }
   });
 
-  await setDoc(doc(db, "dayAgg", key), agg, { merge: false });
+  // Usamos merge: true para no borrar los datos de pagos (Efectivo/MP) guardados
+  await setDoc(doc(db, "dayAgg", key), agg, { merge: true });
 }
 
 // ---------- Permite filtrar por fecha ----------
-
 export function listenSalesByDate(dateKey: string, setter: (rows:any[])=>void) {
   const q = query(
     collection(db, "sales"),
@@ -408,8 +447,8 @@ export function listenSalesByDate(dateKey: string, setter: (rows:any[])=>void) {
     setter(rows as any[]);
   });
 }
-// --- Carga manual de VIANDAS por Admin ---
 
+// --- Carga manual de VIANDAS por Admin ---
 export type ViandaConcept =
   | "PERSONAL"
   | "DESAYUNO"
@@ -420,8 +459,8 @@ export type ViandaConcept =
 type AddManualViandasParams = {
   qty: number;
   concept: ViandaConcept;
-  itemType: ItemType;     // <- importante
-  note?: string;          // <- importante
+  itemType: ItemType;     
+  note?: string;          
   seller: { uid: string; email?: string; name?: string };
 };
 

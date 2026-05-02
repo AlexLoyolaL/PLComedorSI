@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { listenTodaySales } from "../lib/sales";
+import { listenTodaySales, todayKey } from "../lib/sales";
+import { doc, setDoc, serverTimestamp } from "firebase/firestore";
+import { db } from "../firebase";
 
 type Row = any;
 
@@ -9,6 +11,7 @@ type BlockProps = {
   totalMenuCaja: number;
   totalVeggieCaja: number;
   totalCeliacoCaja: number;
+  showSaveButton?: boolean;
 };
 
 type ValoresManual = {
@@ -23,13 +26,14 @@ const RendicionBlock: React.FC<BlockProps> = ({
   totalMenuCaja,
   totalVeggieCaja,
   totalCeliacoCaja,
+  showSaveButton
 }) => {
-  const [valorMenu, setValorMenu] = useState<number>(1500);
-  const [valorVeggie, setValorVeggie] = useState<number>(1500);
-  const [valorCeliaco, setValorCeliaco] = useState<number>(1500);
-  const [valorAcompMenu, setValorAcompMenu] = useState<number>(1550);
-  const [valorAcompVeggie, setValorAcompVeggie] = useState<number>(1550);
-  const [valorMp, setValorMp] = useState<number>(1500);
+  const [valorMenu, setValorMenu] = useState<number>(4000);
+  const [valorVeggie, setValorVeggie] = useState<number>(4000);
+  const [valorCeliaco, setValorCeliaco] = useState<number>(4000);
+  const [valorAcompMenu, setValorAcompMenu] = useState<number>(4000);
+  const [valorAcompVeggie, setValorAcompVeggie] = useState<number>(4000);
+  const [valorMp, setValorMp] = useState<number>(2500);
 
   const [manual, setManual] = useState<ValoresManual>({
     mpComensales: 0,
@@ -38,34 +42,60 @@ const RendicionBlock: React.FC<BlockProps> = ({
   });
 
   const [observaciones, setObservaciones] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
 
   const handleManualChange = (field: keyof ValoresManual, value: string) => {
     const num = Number(value);
     setManual((prev) => ({ ...prev, [field]: isNaN(num) ? 0 : num }));
   };
 
-  const recMenu = valorMenu * totalMenuCaja;
-  const recVeggie = valorVeggie * totalVeggieCaja;
-  const recCeliaco = valorCeliaco * totalCeliacoCaja;
+  // ==========================================
+  // LÓGICA INTELIGENTE DE BALANCE DE CAJA
+  // ==========================================
+  // Restamos de las cajas originales los valores ingresados manualmente.
+  // Usamos Math.max para evitar números negativos si el usuario tipea mal.
+  
+  const menuCalculado = Math.max(0, totalMenuCaja - manual.mpComensales - manual.acompMenuComensales);
+  const veggieCalculado = Math.max(0, totalVeggieCaja - manual.acompVeggieComensales);
+  const celiacoCalculado = totalCeliacoCaja;
+
+  const recMenu = valorMenu * menuCalculado;
+  const recVeggie = valorVeggie * veggieCalculado;
+  const recCeliaco = valorCeliaco * celiacoCalculado;
+  
   const recAcompMenu = valorAcompMenu * manual.acompMenuComensales;
   const recAcompVeggie = valorAcompVeggie * manual.acompVeggieComensales;
   const recMp = valorMp * manual.mpComensales;
 
-  const totalComensales =
-    totalMenuCaja +
-    totalVeggieCaja +
-    totalCeliacoCaja +
-    manual.acompMenuComensales +
-    manual.acompVeggieComensales +
-    manual.mpComensales;
+  // El total de comensales ahora es la sumatoria pura de las viandas despachadas, 
+  // ya que los inputs de MP/Acompañantes son solo re-clasificaciones financieras.
+  const totalComensales = totalMenuCaja + totalVeggieCaja + totalCeliacoCaja;
 
-  const totalEfectivo =
-    recMenu + recVeggie + recCeliaco + recAcompMenu + recAcompVeggie;
-
+  const totalEfectivo = recMenu + recVeggie + recCeliaco + recAcompMenu + recAcompVeggie;
   const totalMp = recMp;
 
-  const formatCurrency = (n: number) =>
-    n === 0 ? "" : `$ ${n.toLocaleString("es-AR")}`;
+  const formatCurrency = (n: number) => n === 0 ? "" : `$ ${n.toLocaleString("es-AR")}`;
+
+  // Función que guarda las métricas de MP y Efectivo a la base de datos
+  const handleSaveDB = async () => {
+    setIsSaving(true);
+    try {
+      // Sumamos la cantidad de raciones cobradas en efectivo (descontando MP)
+      const qtyEfectivo = menuCalculado + veggieCalculado + celiacoCalculado + manual.acompMenuComensales + manual.acompVeggieComensales;
+      const qtyMp = manual.mpComensales;
+
+      await setDoc(doc(db, "dayAgg", todayKey()), {
+        payments: { cash: qtyEfectivo, mp: qtyMp },
+        lastUpdated: serverTimestamp()
+      }, { merge: true });
+
+      alert("¡Rendición de medios de pago guardada en el sistema para Auditoría!");
+    } catch (e: any) {
+      alert("Error al guardar: " + e.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   return (
     <div className="rendicion-card">
@@ -91,21 +121,23 @@ const RendicionBlock: React.FC<BlockProps> = ({
           <tr>
             <td>MENU DEL DÍA</td>
             <td><input className="editable-input" type="number" value={valorMenu} onChange={(e) => setValorMenu(Number(e.target.value))} /></td>
-            <td><input type="number" value={totalMenuCaja} readOnly /></td>
+            {/* Mostramos el valor calculado post-resta */}
+            <td><input type="number" value={menuCalculado} readOnly /></td>
             <td className="num">{formatCurrency(recMenu)}</td>
           </tr>
 
           <tr>
             <td>VEGGIE</td>
             <td><input className="editable-input" type="number" value={valorVeggie} onChange={(e) => setValorVeggie(Number(e.target.value))} /></td>
-            <td><input type="number" value={totalVeggieCaja} readOnly /></td>
+            {/* Mostramos el valor calculado post-resta */}
+            <td><input type="number" value={veggieCalculado} readOnly /></td>
             <td className="num">{formatCurrency(recVeggie)}</td>
           </tr>
 
           <tr>
             <td>CELIACO</td>
             <td><input className="editable-input" type="number" value={valorCeliaco} onChange={(e) => setValorCeliaco(Number(e.target.value))} /></td>
-            <td><input type="number" value={totalCeliacoCaja} readOnly /></td>
+            <td><input type="number" value={celiacoCalculado} readOnly /></td>
             <td className="num">{formatCurrency(recCeliaco)}</td>
           </tr>
 
@@ -151,6 +183,14 @@ const RendicionBlock: React.FC<BlockProps> = ({
         <span>FIRMA Y ACLARACION:</span>
         <div className="firma-line" />
       </div>
+
+      {showSaveButton && (
+        <div className="screen-only" style={{ marginTop: 20, textAlign: "center" }}>
+          <button className="button" style={{ background: "#10b981" }} onClick={handleSaveDB} disabled={isSaving}>
+            {isSaving ? "Guardando..." : "Guardar Totales de MP/Efectivo en Sistema"}
+          </button>
+        </div>
+      )}
     </div>
   );
 };
@@ -164,12 +204,13 @@ const RendicionPage: React.FC = () => {
     () =>
       rows.reduce(
         (acc, r: any) => {
-          // SOLO ventas de caja con socio real
+          // SOLO ventas de caja con socio real (Y QUE NO SEAN GRATIS)
           const memberId = (r.member?.id ?? "").trim();
 
           if (
             !r.voided &&
-            memberId !== "" && // excluye las cargas sin socio (AdminViandas)
+            !r.isSubsidized && // Filtramos los gratuitos
+            memberId !== "" &&
             (r.itemType === "MENU" ||
               r.itemType === "VEGGIE" ||
               r.itemType === "CELIACO")
@@ -186,8 +227,6 @@ const RendicionPage: React.FC = () => {
       ),
     [rows]
   );
-
-
 
   const now = new Date();
   const fechaTexto = now.toLocaleDateString("es-AR");
@@ -212,11 +251,11 @@ const RendicionPage: React.FC = () => {
 
       <div className="rendicion-page">
         <div className="rendicion-instance">
-          <RendicionBlock {...blockProps} />
+          <RendicionBlock {...blockProps} showSaveButton={true} />
         </div>
 
         <div className="rendicion-instance rendicion-copy">
-          <RendicionBlock {...blockProps} />
+          <RendicionBlock {...blockProps} showSaveButton={false} />
         </div>
       </div>
     </div>

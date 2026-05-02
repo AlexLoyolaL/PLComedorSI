@@ -1,11 +1,12 @@
 // src/components/RequireRole.tsx
-import type { ReactNode } from "react";              // ← type-only import
-import { useRoleGate } from "../hooks/useRoleGate";  // ruta correcta: components -> hooks
+import type { ReactNode } from "react";
+import { useAuth } from "../state/AuthContext"; // Conectamos directo a la fuente de verdad
 
-type Role = "admin" | "supervisor" | "administrativo" | "cocina";
+// Actualizamos los tipos estrictos a la nueva arquitectura RBAC
+type Role = "root" | "administrador" | "administrativo" | "cocina" | "visor" | "gabinete";
 
 type Props = {
-  allowAny: Role[];       // puede recibir varios roles permitidos
+  allowAny: Role[];
   children: ReactNode;
   fallback?: ReactNode;
 };
@@ -19,22 +20,20 @@ export function RequireRole({
     </div>
   ),
 }: Props) {
-  const { loading, isAdmin, isSupervisor, isAdministrativo, isCocina } = useRoleGate();
+  // Extraemos directamente el rol del estado global
+  const { role, loading } = useAuth();
 
   if (loading) {
     return <div style={{ color: "var(--muted)" }}>Cargando permisos…</div>;
   }
 
-  const have: Record<Role, boolean> = {
-    admin: isAdmin,
-    supervisor: isSupervisor,
-    administrativo: isAdministrativo,
-    cocina: isCocina,
-  };
+  // 1. ROOT bypass: Si el usuario es root, pasa automáticamente (God Mode)
+  const isRoot = role === "root";
 
-  const ok = allowAny.some((r) => have[r]);
+  // 2. Validación estándar: Verificamos si el string del rol actual está en el array permitido
+  const isAllowed = role && allowAny.includes(role as Role);
 
-  return ok ? <>{children}</> : <>{fallback}</>;
+  return (isRoot || isAllowed) ? <>{children}</> : <>{fallback}</>;
 }
 
 export default RequireRole;
