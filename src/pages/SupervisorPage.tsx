@@ -2,7 +2,7 @@ import Supervisor from "./Supervisor";
 import { RequireRole } from "../components/RequireRole";
 export default function SupervisorPage() {
   return (
-    <RequireRole allowAny={["supervisor", "administrativo"]}>
+    <RequireRole allowAny={["visor", "administrativo"]}>
       <Supervisor />
     </RequireRole>
   );

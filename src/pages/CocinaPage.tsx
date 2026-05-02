@@ -3,7 +3,7 @@ import Cocina from "./Cocina";
 import { RequireRole } from "../components/RequireRole";
 export default function CocinaPage() {
   return (
-    <RequireRole allowAny={["cocina", "administrativo", "admin"]}>
+    <RequireRole allowAny={["cocina", "administrativo", "administrador"]}>
       <Cocina />
     </RequireRole>
   );
