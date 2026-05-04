@@ -5,7 +5,8 @@ import { db } from "../firebase";
 import { Card } from "../ui/Card";
 import {
   ResponsiveContainer,
-  BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend
+  BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
+  PieChart, Pie, Cell
 } from "recharts";
 import * as XLSX from "xlsx";
 
@@ -48,6 +49,7 @@ export default function Supervisor() {
   
   // Gráficos y Métricas
   const [dailyData, setDailyData] = useState<any[]>([]);
+  const [pieData, setPieData] = useState<any[]>([]);
   const [uniqueCount, setUniqueCount] = useState<number | null>(null);
 
   // Checkbox de Auditoría
@@ -59,7 +61,6 @@ export default function Supervisor() {
   const [calculatingExport, setCalculatingExport] = useState(false);
   const [err, setErr] = useState<string>("");
 
-  // 1. CARGA EFICIENTE DE GRÁFICOS
   async function loadChartsData() {
     try {
       const qAgg = query(
@@ -70,24 +71,32 @@ export default function Supervisor() {
       const snap = await getDocs(qAgg);
       
       const dData: any[] = [];
+      
+      // Contadores acumulados para la torta
+      let totalMenu = 0;
+      let totalVeggie = 0;
+      let totalCeliaco = 0;
 
       snap.forEach((doc) => {
         const d = doc.data() as any;
         
-        // 1. Intentamos buscar el formato nuevo
+        // 1. Sumamos las cantidades físicas del día (comedor + vianda)
+        const cM = d.comedor?.MENU || 0;
+        const cV = d.comedor?.VEGGIE || 0;
+        const cC = d.comedor?.CELIACO || 0;
+        const vM = d.vianda?.MENU || 0;
+        const vV = d.vianda?.VEGGIE || 0;
+        const vC = d.vianda?.CELIACO || 0;
+        
+        totalMenu += (cM + vM);
+        totalVeggie += (cV + vV);
+        totalCeliaco += (cC + vC);
+
+        // 2. Lógica financiera (la que ya tenías)
         let paid = d.financial?.paid;
         let subsidized = d.financial?.subsidized || 0;
 
-        // 2. BACKWARD COMPATIBILITY: Si 'paid' es undefined, es un documento viejo. 
-        // Sumamos a la vieja usanza y lo asignamos como venta normal.
         if (paid === undefined) {
-          const cM = d.comedor?.MENU || 0;
-          const cV = d.comedor?.VEGGIE || 0;
-          const cC = d.comedor?.CELIACO || 0;
-          const vM = d.vianda?.MENU || 0;
-          const vV = d.vianda?.VEGGIE || 0;
-          const vC = d.vianda?.CELIACO || 0;
-          
           paid = cM + cV + cC + vM + vV + vC;
         }
 
@@ -105,6 +114,14 @@ export default function Supervisor() {
 
       dData.sort((a, b) => a.date.localeCompare(b.date));
       setDailyData(dData);
+      
+      // 3. Seteamos la información de la torta
+      setPieData([
+        { name: "Menú", value: totalMenu, color: "#3b82f6" },     // Azul
+        { name: "Veggie", value: totalVeggie, color: "#10b981" }, // Verde
+        { name: "Celíaco", value: totalCeliaco, color: "#f59e0b" } // Naranja
+      ].filter(item => item.value > 0)); // Filtramos los que estén en cero para no renderizar pedazos vacíos
+
     } catch (e) {
       console.error("Error cargando gráficos", e);
     }
@@ -373,6 +390,42 @@ export default function Supervisor() {
               </ResponsiveContainer>
             </div>
           </div>
+  
+          {/* NUEVO Gráfico 3: Torta de Distribución */}
+          <div className="panel">
+            <div style={{ fontWeight: 700, marginBottom: 8, color: "#fff", textAlign: "center" }}>Distribución de Platos</div>
+            <div style={{ height: 260 }}>
+              {pieData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={pieData}
+                      dataKey="value"
+                      nameKey="name"
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={80}
+                      label={({ name, percent }: any) => `${name} ${(percent * 100).toFixed(0)}%`}
+                    >
+                      {pieData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip 
+                      contentStyle={{ background: "rgba(18, 24, 42, 0.95)", border: "1px solid #334", borderRadius: 8, color: "#fff" }} 
+                      itemStyle={{ color: "#fff" }}
+                    />
+                    <Legend wrapperStyle={{ color: "#fff", paddingTop: 10 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div style={{ display: "flex", height: "100%", justifyContent: "center", alignItems: "center", color: "var(--muted)" }}>
+                  No hay datos para este rango
+                </div>
+              )}
+            </div>
+          </div>
+          
 
         </div>
 
