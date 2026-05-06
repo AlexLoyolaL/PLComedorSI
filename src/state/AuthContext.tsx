@@ -1,7 +1,6 @@
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import type { User } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore"; 
-
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { auth, provider, db } from "../firebase"; 
 
@@ -35,6 +34,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(u); 
         
         if (u) {
+
+          try {
+            await setDoc(doc(db, "users", u.uid), {
+              uid: u.uid,
+              email: u.email?.toLowerCase(),
+              name: u.displayName || "",
+              lastLogin: new Date()
+            }, { merge: true });
+          } catch (e) {
+            console.error("Error guardando perfil de usuario:", e);
+          }
+
           try {
             const rolesRef = doc(db, "app", "roles");
             const rolesSnap = await getDoc(rolesRef);

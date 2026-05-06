@@ -7,8 +7,9 @@ import AdminViandasPage from "./pages/AdminViandas";
 import RendicionPage from "./pages/Rendicion";
 import { useState, useEffect } from "react";
 import Gabinete from "./pages/Gabinete";
+import AdminRolesPage from "./pages/AdminRoles";
 
-type Tab = "caja" | "cocina" | "super" | "admin" | "rendicion" | "gabinete";
+type Tab = "caja" | "cocina" | "super" | "admin" | "rendicion" | "gabinete" | "adminRoles";
 
 export default function App() {
   const { user, role, loading, logout } = useAuth();
@@ -137,6 +138,13 @@ export default function App() {
           </button>
         )}
 
+        {/* NUEVO: Compuerta exclusiva para ROOT (God Mode) */}
+        {isRoot && (
+          <button className={`tab ${tab === "adminRoles" ? "active" : ""}`} onClick={() => setTab("adminRoles")}>
+            🔑 Accesos
+          </button>
+        )}
+
         <div className="fill" />
         <span className="badge">{user.email}</span>
         <button className="button ghost" onClick={logout}>
@@ -151,6 +159,7 @@ export default function App() {
         {tab === "gabinete" && canSeeGabinete && <Gabinete />}
         {tab === "admin" && canSeeAdminViandas && <AdminViandasPage />}
         {tab === "rendicion" && canSeeRendicion && <RendicionPage />}
+        {tab === "adminRoles" && isRoot && <AdminRolesPage />}
       </div>
     </div>
   );
