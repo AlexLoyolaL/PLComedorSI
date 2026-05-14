@@ -8,8 +8,9 @@ import RendicionPage from "./pages/Rendicion";
 import { useState, useEffect } from "react";
 import Gabinete from "./pages/Gabinete";
 import AdminRolesPage from "./pages/AdminRoles";
+import AuditoriaRendicionPage from "./pages/AuditoriaRendicion";
 
-type Tab = "caja" | "cocina" | "super" | "admin" | "rendicion" | "gabinete" | "adminRoles";
+type Tab = "caja" | "cocina" | "super" | "admin" | "rendicion" | "gabinete" | "adminRoles" | "auditoria";
 
 export default function App() {
   const { user, role, loading, logout } = useAuth();
@@ -137,6 +138,11 @@ export default function App() {
             Rendición
           </button>
         )}
+        {(isRoot || isAdmin || isVisor) && (
+          <button className={`tab ${tab === "auditoria" ? "active" : ""}`} onClick={() => setTab("auditoria")}>
+            📊 Auditoría
+          </button>
+        )}
 
         {/* NUEVO: Compuerta exclusiva para ROOT (God Mode) */}
         {isRoot && (
@@ -160,6 +166,7 @@ export default function App() {
         {tab === "admin" && canSeeAdminViandas && <AdminViandasPage />}
         {tab === "rendicion" && canSeeRendicion && <RendicionPage />}
         {tab === "adminRoles" && isRoot && <AdminRolesPage />}
+        {tab === "auditoria" && (isRoot || isAdmin || isVisor) && <AuditoriaRendicionPage />}
       </div>
     </div>
   );

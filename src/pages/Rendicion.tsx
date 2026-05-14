@@ -1,7 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { listenTodaySales, todayKey } from "../lib/sales";
 import { doc, setDoc, serverTimestamp } from "firebase/firestore";
-import { db } from "../firebase";
+import { db, storage } from "../firebase"; // Asegurate de importar storage
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import html2canvas from "html2canvas";
+import { jsPDF } from "jspdf";
+import { useAuth } from "../state/AuthContext";
 
 type Row = any;
 
@@ -18,6 +22,7 @@ type ValoresManual = {
   mpComensales: number;
   acompMenuComensales: number;
   acompVeggieComensales: number;
+  subvencionados: number; // NUEVO CAMPO
 };
 
 const RendicionBlock: React.FC<BlockProps> = ({
@@ -39,6 +44,7 @@ const RendicionBlock: React.FC<BlockProps> = ({
     mpComensales: 0,
     acompMenuComensales: 0,
     acompVeggieComensales: 0,
+    subvencionados: 0,
   });
 
   const [observaciones, setObservaciones] = useState("");
@@ -53,9 +59,8 @@ const RendicionBlock: React.FC<BlockProps> = ({
   // LÓGICA INTELIGENTE DE BALANCE DE CAJA
   // ==========================================
   // Restamos de las cajas originales los valores ingresados manualmente.
-  // Usamos Math.max para evitar números negativos si el usuario tipea mal.
-  
-  const menuCalculado = Math.max(0, totalMenuCaja - manual.mpComensales - manual.acompMenuComensales);
+  // NUEVO: Ahora también restamos los subvencionados del menú calculado.
+  const menuCalculado = Math.max(0, totalMenuCaja - manual.mpComensales - manual.acompMenuComensales - manual.subvencionados);
   const veggieCalculado = Math.max(0, totalVeggieCaja - manual.acompVeggieComensales);
   const celiacoCalculado = totalCeliacoCaja;
 
@@ -67,8 +72,8 @@ const RendicionBlock: React.FC<BlockProps> = ({
   const recAcompVeggie = valorAcompVeggie * manual.acompVeggieComensales;
   const recMp = valorMp * manual.mpComensales;
 
-  // El total de comensales ahora es la sumatoria pura de las viandas despachadas, 
-  // ya que los inputs de MP/Acompañantes son solo re-clasificaciones financieras.
+  const { user } = useAuth();
+  // El total de comensales es la sumatoria pura de viandas despachadas (Incluye gratis)
   const totalComensales = totalMenuCaja + totalVeggieCaja + totalCeliacoCaja;
 
   const totalEfectivo = recMenu + recVeggie + recCeliaco + recAcompMenu + recAcompVeggie;
@@ -76,20 +81,53 @@ const RendicionBlock: React.FC<BlockProps> = ({
 
   const formatCurrency = (n: number) => n === 0 ? "" : `$ ${n.toLocaleString("es-AR")}`;
 
-  // Función que guarda las métricas de MP y Efectivo a la base de datos
   const handleSaveDB = async () => {
     setIsSaving(true);
     try {
-      // Sumamos la cantidad de raciones cobradas en efectivo (descontando MP)
-      const qtyEfectivo = menuCalculado + veggieCalculado + celiacoCalculado + manual.acompMenuComensales + manual.acompVeggieComensales;
-      const qtyMp = manual.mpComensales;
+      // 1. GENERAMOS EL PDF (Foto de la pantalla original)
+      const element = document.getElementById("rendicion-original");
+      if (!element) throw new Error("No se encontró la tabla para imprimir");
+      
+      const canvas = await html2canvas(element, { scale: 2 }); // Scale 2 para alta calidad
+      const imgData = canvas.toDataURL("image/png");
+      
+      const pdf = new jsPDF("p", "mm", "a4");
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+      
+      pdf.addImage(imgData, "PNG", 0, 10, pdfWidth, pdfHeight);
+      const pdfBlob = pdf.output("blob");
 
+      // 2. SUBIMOS EL PDF A STORAGE
+      const uniqueName = `rendicion_${todayKey()}_${Date.now()}.pdf`;
+      const storageRef = ref(storage, `rendiciones/${uniqueName}`);
+      await uploadBytes(storageRef, pdfBlob);
+      const pdfUrl = await getDownloadURL(storageRef);
+
+      // 3. ACTUALIZAMOS DAY_AGG (Métricas operativas)
+      const qtyEfectivo = menuCalculado + veggieCalculado + celiacoCalculado + manual.acompMenuComensales + manual.acompVeggieComensales;
       await setDoc(doc(db, "dayAgg", todayKey()), {
-        payments: { cash: qtyEfectivo, mp: qtyMp },
+        payments: { cash: qtyEfectivo, mp: manual.mpComensales, subvencionados: manual.subvencionados },
         lastUpdated: serverTimestamp()
       }, { merge: true });
 
-      alert("¡Rendición de medios de pago guardada en el sistema para Auditoría!");
+      // 4. GUARDAMOS EN LA TABLA DE AUDITORÍA
+      await setDoc(doc(db, "rendiciones_audit", todayKey()), {
+        dateKey: todayKey(),
+        timestamp: serverTimestamp(),
+        pdfUrl: pdfUrl,
+        observaciones: observaciones,
+        totales: {
+          comensalesTotales: totalComensales,
+          efectivoPesos: totalEfectivo,
+          mpPesos: totalMp,
+          qtyEfectivo: qtyEfectivo,
+          qtyMp: manual.mpComensales,
+          qtySubvencionados: manual.subvencionados
+        }
+      });
+
+      alert("✅ ¡Rendición guardada exitosamente y PDF generado para Auditoría!");
     } catch (e: any) {
       alert("Error al guardar: " + e.message);
     } finally {
@@ -98,7 +136,7 @@ const RendicionBlock: React.FC<BlockProps> = ({
   };
 
   return (
-    <div className="rendicion-card">
+    <div className="rendicion-card" id={showSaveButton ? "rendicion-original" : ""}>
       <div className="rendicion-header">
         <div className="rendicion-title">COMEDOR PUERTO LIBRE - LIQUIDACION</div>
         <div className="rendicion-subtitle">COOPERADORA JUVENTUD PROLONGADA</div>
@@ -121,7 +159,6 @@ const RendicionBlock: React.FC<BlockProps> = ({
           <tr>
             <td>MENU DEL DÍA</td>
             <td><input className="editable-input" type="number" value={valorMenu} onChange={(e) => setValorMenu(Number(e.target.value))} /></td>
-            {/* Mostramos el valor calculado post-resta */}
             <td><input type="number" value={menuCalculado} readOnly /></td>
             <td className="num">{formatCurrency(recMenu)}</td>
           </tr>
@@ -129,7 +166,6 @@ const RendicionBlock: React.FC<BlockProps> = ({
           <tr>
             <td>VEGGIE</td>
             <td><input className="editable-input" type="number" value={valorVeggie} onChange={(e) => setValorVeggie(Number(e.target.value))} /></td>
-            {/* Mostramos el valor calculado post-resta */}
             <td><input type="number" value={veggieCalculado} readOnly /></td>
             <td className="num">{formatCurrency(recVeggie)}</td>
           </tr>
@@ -161,6 +197,14 @@ const RendicionBlock: React.FC<BlockProps> = ({
             <td><input className="editable-input" type="number" value={manual.acompVeggieComensales} onChange={(e) => handleManualChange("acompVeggieComensales", e.target.value)} /></td>
             <td className="num">{formatCurrency(recAcompVeggie)}</td>
           </tr>
+
+          {/* NUEVO CAMPO: SUBVENCIONADOS */}
+          <tr>
+            <td style={{ color: "#3b82f6", fontWeight: "bold" }}>Extra sin cargo</td>
+            <td>$ 0</td>
+            <td><input className="editable-input" type="number" value={manual.subvencionados} onChange={(e) => handleManualChange("subvencionados", e.target.value)} /></td>
+            <td className="num">$ 0</td>
+          </tr>
         </tbody>
       </table>
 
@@ -179,15 +223,19 @@ const RendicionBlock: React.FC<BlockProps> = ({
         />
       </div>
 
-      <div className="rendicion-firma">
-        <span>FIRMA Y ACLARACION:</span>
-        <div className="firma-line" />
+      {/* SECCIÓN DE FIRMA ACTUALIZADA */}
+      <div className="rendicion-firma" style={{ marginTop: 30 }}>
+        <div style={{ marginBottom: 8 }}>
+          RESPONSABLE: <strong>{user?.displayName || user?.email}</strong>
+        </div>
+        <div className="firma-line" style={{ borderBottom: '1px solid #000', width: '250px', marginBottom: 4 }} />
+        <span style={{ fontSize: 10, color: '#666' }}>FIRMA Y ACLARACIÓN</span>
       </div>
 
       {showSaveButton && (
         <div className="screen-only" style={{ marginTop: 20, textAlign: "center" }}>
           <button className="button" style={{ background: "#10b981" }} onClick={handleSaveDB} disabled={isSaving}>
-            {isSaving ? "Guardando..." : "Guardar Totales de MP/Efectivo en Sistema"}
+            {isSaving ? "Generando PDF y Guardando..." : "Cerrar Turno, Guardar y Generar PDF"}
           </button>
         </div>
       )}
@@ -204,12 +252,11 @@ const RendicionPage: React.FC = () => {
     () =>
       rows.reduce(
         (acc, r: any) => {
-          // SOLO ventas de caja con socio real (Y QUE NO SEAN GRATIS)
           const memberId = (r.member?.id ?? "").trim();
 
           if (
             !r.voided &&
-            !r.isSubsidized && // Filtramos los gratuitos
+            // ELIMINAMOS !r.isSubsidized para que los cuente en el físico
             memberId !== "" &&
             (r.itemType === "MENU" ||
               r.itemType === "VEGGIE" ||
@@ -220,10 +267,7 @@ const RendicionPage: React.FC = () => {
 
           return acc;
         },
-        { MENU: 0, VEGGIE: 0, CELIACO: 0 } as Record<
-          "MENU" | "VEGGIE" | "CELIACO",
-          number
-        >
+        { MENU: 0, VEGGIE: 0, CELIACO: 0 } as Record<"MENU" | "VEGGIE" | "CELIACO", number>
       ),
     [rows]
   );
