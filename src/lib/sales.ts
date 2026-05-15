@@ -36,9 +36,45 @@ export function tableCapacityFromKey(key: string): number {
   return 9;   // resto de mesas
 }
 
+// ============================================================================
+// LÓGICA DE FECHAS (MODIFICADA PARA PREVENTA 27/05)
+// ============================================================================
+
+/** * Verifica si una fecha cae en la ventana de preventa.
+ * (Del 15 al 26 de Mayo de 2026, de 14:00 a 23:59 hs).
+ */
+function isPreventaWindow(d: dayjs.Dayjs): boolean {
+  return (
+    d.year() === 2026 &&
+    d.month() === 4 && // Mayo (Enero = 0)
+    d.date() >= 15 &&
+    d.date() <= 26 &&
+    d.hour() >= 14
+  );
+}
+
 /** Clave de día (TZ AR) */
-export const todayKey = () => dayjs().tz(TZ).format("YYYY-MM-DD");
-export const keyFromDate = (d: Date) => dayjs(d).tz(TZ).format("YYYY-MM-DD");
+export const todayKey = () => {
+  const now = dayjs().tz(TZ);
+
+  if (isPreventaWindow(now)) {
+    return "2026-05-27"; // Bypass de Preventa
+  }
+
+  return now.format("YYYY-MM-DD");
+};
+
+export const keyFromDate = (date: Date) => {
+  const d = dayjs(date).tz(TZ);
+
+  if (isPreventaWindow(d)) {
+    return "2026-05-27"; // Bypass de Preventa
+  }
+
+  return d.format("YYYY-MM-DD");
+};
+
+// ============================================================================
 
 /** Normaliza label de mesa a clave corta p.ej. "M01" */
 export function tableKey(table?: string | null) {
@@ -112,16 +148,6 @@ export async function ensureDaySettings() {
   });
 }
 
-/*
-function afterCutoff(mode: "COMEDOR" | "VIANDA", settings: any) {
-  const now = dayjs().tz(TZ);
-  const hhmm = mode === "COMEDOR" ? settings.cutoffs.comedor : settings.cutoffs.vianda;
-  const [hh, mm] = hhmm.split(":").map(Number);
-  const limit = now.hour(hh).minute(mm).second(0).millisecond(0);
-  return now.isAfter(limit);
-}
-*/
-
 // ---------- ALTA DE VENTA (VERSIÓN OFFLINE-READY + SUBVENCIONADOS) ----------
 export async function createSaleTx(params: {
   seller: { uid: string; email: string; name: string };
@@ -154,14 +180,6 @@ export async function createSaleTx(params: {
   // 1) Obtenemos settings de manera segura
   const st = await getOfflineSafe(settingsRef);
   const settings = (st.exists() ? st.data() : {}) as any;
-
-  // 2) Cortes horarios (Comentado para pruebas nocturnas, podés descomentarlo después)
-  /*
-  if (settings.cutoffs && afterCutoff(params.dest.mode, settings)) {
-    const horaCorte = params.dest.mode === "COMEDOR" ? settings.cutoffs.comedor : settings.cutoffs.vianda;
-    throw new Error(`El horario para ${params.dest.mode.toLowerCase()} finalizó a las ${horaCorte} hs.`);
-  }
-  */
 
   // 3) Validaciones de mesa/tipo
   if (params.dest.mode === "COMEDOR") {
