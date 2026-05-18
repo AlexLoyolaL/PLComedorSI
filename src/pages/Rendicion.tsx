@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { listenTodaySales, todayKey } from "../lib/sales";
 import { doc, setDoc, serverTimestamp } from "firebase/firestore";
-import { db, storage } from "../firebase"; // Asegurate de importar storage
+import { db, storage } from "../firebase";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
@@ -9,6 +9,24 @@ import { useAuth } from "../state/AuthContext";
 
 type Row = any;
 
+// NUEVO: Definimos la estructura de todos los estados compartidos
+export type RendicionState = {
+  valorMenu: number;
+  valorVeggie: number;
+  valorCeliaco: number;
+  valorAcompMenu: number;
+  valorAcompVeggie: number;
+  valorMp: number;
+  manual: {
+    mpComensales: number;
+    acompMenuComensales: number;
+    acompVeggieComensales: number;
+    subvencionados: number;
+  };
+  observaciones: string;
+};
+
+// NUEVO: Ampliamos las props para recibir el estado y la función para actualizarlo
 type BlockProps = {
   fechaTexto: string;
   diaSemana: string;
@@ -16,13 +34,9 @@ type BlockProps = {
   totalVeggieCaja: number;
   totalCeliacoCaja: number;
   showSaveButton?: boolean;
-};
-
-type ValoresManual = {
-  mpComensales: number;
-  acompMenuComensales: number;
-  acompVeggieComensales: number;
-  subvencionados: number; // NUEVO CAMPO
+  state: RendicionState;
+  updateState: (newState: Partial<RendicionState>) => void;
+  updateManual: (field: keyof RendicionState["manual"], value: number) => void;
 };
 
 const RendicionBlock: React.FC<BlockProps> = ({
@@ -31,51 +45,28 @@ const RendicionBlock: React.FC<BlockProps> = ({
   totalMenuCaja,
   totalVeggieCaja,
   totalCeliacoCaja,
-  showSaveButton
+  showSaveButton,
+  state,           // RECIBIMOS EL ESTADO COMPARTIDO
+  updateState,     // RECIBIMOS LAS FUNCIONES PARA ACTUALIZAR
+  updateManual
 }) => {
-  const [valorMenu, setValorMenu] = useState<number>(2500);
-  const [valorVeggie, setValorVeggie] = useState<number>(2500);
-  const [valorCeliaco, setValorCeliaco] = useState<number>(2500);
-  const [valorAcompMenu, setValorAcompMenu] = useState<number>(2500);
-  const [valorAcompVeggie, setValorAcompVeggie] = useState<number>(2500);
-  const [valorMp, setValorMp] = useState<number>(2500);
-
-  const [manual, setManual] = useState<ValoresManual>({
-    mpComensales: 0,
-    acompMenuComensales: 0,
-    acompVeggieComensales: 0,
-    subvencionados: 0,
-  });
-
-  const [observaciones, setObservaciones] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const { user } = useAuth();
 
-  const handleManualChange = (field: keyof ValoresManual, value: string) => {
-    const num = Number(value);
-    setManual((prev) => ({ ...prev, [field]: isNaN(num) ? 0 : num }));
-  };
-
-  // ==========================================
-  // LÓGICA INTELIGENTE DE BALANCE DE CAJA
-  // ==========================================
-  // Restamos de las cajas originales los valores ingresados manualmente.
-  // NUEVO: Ahora también restamos los subvencionados del menú calculado.
-  const menuCalculado = Math.max(0, totalMenuCaja - manual.mpComensales - manual.acompMenuComensales - manual.subvencionados);
-  const veggieCalculado = Math.max(0, totalVeggieCaja - manual.acompVeggieComensales);
+  // Usamos los valores del estado central
+  const menuCalculado = Math.max(0, totalMenuCaja - state.manual.mpComensales - state.manual.acompMenuComensales - state.manual.subvencionados);
+  const veggieCalculado = Math.max(0, totalVeggieCaja - state.manual.acompVeggieComensales);
   const celiacoCalculado = totalCeliacoCaja;
 
-  const recMenu = valorMenu * menuCalculado;
-  const recVeggie = valorVeggie * veggieCalculado;
-  const recCeliaco = valorCeliaco * celiacoCalculado;
+  const recMenu = state.valorMenu * menuCalculado;
+  const recVeggie = state.valorVeggie * veggieCalculado;
+  const recCeliaco = state.valorCeliaco * celiacoCalculado;
   
-  const recAcompMenu = valorAcompMenu * manual.acompMenuComensales;
-  const recAcompVeggie = valorAcompVeggie * manual.acompVeggieComensales;
-  const recMp = valorMp * manual.mpComensales;
+  const recAcompMenu = state.valorAcompMenu * state.manual.acompMenuComensales;
+  const recAcompVeggie = state.valorAcompVeggie * state.manual.acompVeggieComensales;
+  const recMp = state.valorMp * state.manual.mpComensales;
 
-  const { user } = useAuth();
-  // El total de comensales es la sumatoria pura de viandas despachadas (Incluye gratis)
   const totalComensales = totalMenuCaja + totalVeggieCaja + totalCeliacoCaja;
-
   const totalEfectivo = recMenu + recVeggie + recCeliaco + recAcompMenu + recAcompVeggie;
   const totalMp = recMp;
 
@@ -84,11 +75,10 @@ const RendicionBlock: React.FC<BlockProps> = ({
   const handleSaveDB = async () => {
     setIsSaving(true);
     try {
-      // 1. GENERAMOS EL PDF (Foto de la pantalla original)
       const element = document.getElementById("rendicion-original");
       if (!element) throw new Error("No se encontró la tabla para imprimir");
       
-      const canvas = await html2canvas(element, { scale: 2 }); // Scale 2 para alta calidad
+      const canvas = await html2canvas(element, { scale: 2 });
       const imgData = canvas.toDataURL("image/png");
       
       const pdf = new jsPDF("p", "mm", "a4");
@@ -98,32 +88,29 @@ const RendicionBlock: React.FC<BlockProps> = ({
       pdf.addImage(imgData, "PNG", 0, 10, pdfWidth, pdfHeight);
       const pdfBlob = pdf.output("blob");
 
-      // 2. SUBIMOS EL PDF A STORAGE
       const uniqueName = `rendicion_${todayKey()}_${Date.now()}.pdf`;
       const storageRef = ref(storage, `rendiciones/${uniqueName}`);
       await uploadBytes(storageRef, pdfBlob);
       const pdfUrl = await getDownloadURL(storageRef);
 
-      // 3. ACTUALIZAMOS DAY_AGG (Métricas operativas)
-      const qtyEfectivo = menuCalculado + veggieCalculado + celiacoCalculado + manual.acompMenuComensales + manual.acompVeggieComensales;
+      const qtyEfectivo = menuCalculado + veggieCalculado + celiacoCalculado + state.manual.acompMenuComensales + state.manual.acompVeggieComensales;
       await setDoc(doc(db, "dayAgg", todayKey()), {
-        payments: { cash: qtyEfectivo, mp: manual.mpComensales, subvencionados: manual.subvencionados },
+        payments: { cash: qtyEfectivo, mp: state.manual.mpComensales, subvencionados: state.manual.subvencionados },
         lastUpdated: serverTimestamp()
       }, { merge: true });
 
-      // 4. GUARDAMOS EN LA TABLA DE AUDITORÍA
       await setDoc(doc(db, "rendiciones_audit", todayKey()), {
         dateKey: todayKey(),
         timestamp: serverTimestamp(),
         pdfUrl: pdfUrl,
-        observaciones: observaciones,
+        observaciones: state.observaciones,
         totales: {
           comensalesTotales: totalComensales,
           efectivoPesos: totalEfectivo,
           mpPesos: totalMp,
           qtyEfectivo: qtyEfectivo,
-          qtyMp: manual.mpComensales,
-          qtySubvencionados: manual.subvencionados
+          qtyMp: state.manual.mpComensales,
+          qtySubvencionados: state.manual.subvencionados
         }
       });
 
@@ -158,51 +145,50 @@ const RendicionBlock: React.FC<BlockProps> = ({
         <tbody>
           <tr>
             <td>MENU DEL DÍA</td>
-            <td><input className="editable-input" type="number" value={valorMenu} onChange={(e) => setValorMenu(Number(e.target.value))} /></td>
+            <td><input className="editable-input" type="number" value={state.valorMenu} onChange={(e) => updateState({ valorMenu: Number(e.target.value) })} /></td>
             <td><input type="number" value={menuCalculado} readOnly /></td>
             <td className="num">{formatCurrency(recMenu)}</td>
           </tr>
 
           <tr>
             <td>VEGGIE</td>
-            <td><input className="editable-input" type="number" value={valorVeggie} onChange={(e) => setValorVeggie(Number(e.target.value))} /></td>
+            <td><input className="editable-input" type="number" value={state.valorVeggie} onChange={(e) => updateState({ valorVeggie: Number(e.target.value) })} /></td>
             <td><input type="number" value={veggieCalculado} readOnly /></td>
             <td className="num">{formatCurrency(recVeggie)}</td>
           </tr>
 
           <tr>
             <td>CELIACO</td>
-            <td><input className="editable-input" type="number" value={valorCeliaco} onChange={(e) => setValorCeliaco(Number(e.target.value))} /></td>
+            <td><input className="editable-input" type="number" value={state.valorCeliaco} onChange={(e) => updateState({ valorCeliaco: Number(e.target.value) })} /></td>
             <td><input type="number" value={celiacoCalculado} readOnly /></td>
             <td className="num">{formatCurrency(recCeliaco)}</td>
           </tr>
 
           <tr>
             <td>PAGOS MERCADO PAGO</td>
-            <td><input className="editable-input" type="number" value={valorMp} onChange={(e) => setValorMp(Number(e.target.value))} /></td>
-            <td><input className="editable-input" type="number" value={manual.mpComensales} onChange={(e) => handleManualChange("mpComensales", e.target.value)} /></td>
+            <td><input className="editable-input" type="number" value={state.valorMp} onChange={(e) => updateState({ valorMp: Number(e.target.value) })} /></td>
+            <td><input className="editable-input" type="number" value={state.manual.mpComensales} onChange={(e) => updateManual("mpComensales", Number(e.target.value))} /></td>
             <td className="num">{formatCurrency(recMp)}</td>
           </tr>
 
           <tr>
             <td>ACOMP. TERAP. MENU</td>
-            <td><input className="editable-input" type="number" value={valorAcompMenu} onChange={(e) => setValorAcompMenu(Number(e.target.value))} /></td>
-            <td><input className="editable-input" type="number" value={manual.acompMenuComensales} onChange={(e) => handleManualChange("acompMenuComensales", e.target.value)} /></td>
+            <td><input className="editable-input" type="number" value={state.valorAcompMenu} onChange={(e) => updateState({ valorAcompMenu: Number(e.target.value) })} /></td>
+            <td><input className="editable-input" type="number" value={state.manual.acompMenuComensales} onChange={(e) => updateManual("acompMenuComensales", Number(e.target.value))} /></td>
             <td className="num">{formatCurrency(recAcompMenu)}</td>
           </tr>
 
           <tr>
             <td>ACOMP. TERAP. VEGGIE</td>
-            <td><input className="editable-input" type="number" value={valorAcompVeggie} onChange={(e) => setValorAcompVeggie(Number(e.target.value))} /></td>
-            <td><input className="editable-input" type="number" value={manual.acompVeggieComensales} onChange={(e) => handleManualChange("acompVeggieComensales", e.target.value)} /></td>
+            <td><input className="editable-input" type="number" value={state.valorAcompVeggie} onChange={(e) => updateState({ valorAcompVeggie: Number(e.target.value) })} /></td>
+            <td><input className="editable-input" type="number" value={state.manual.acompVeggieComensales} onChange={(e) => updateManual("acompVeggieComensales", Number(e.target.value))} /></td>
             <td className="num">{formatCurrency(recAcompVeggie)}</td>
           </tr>
 
-          {/* NUEVO CAMPO: SUBVENCIONADOS */}
           <tr>
             <td style={{ color: "#3b82f6", fontWeight: "bold" }}>Extra sin cargo</td>
             <td>$ 0</td>
-            <td><input className="editable-input" type="number" value={manual.subvencionados} onChange={(e) => handleManualChange("subvencionados", e.target.value)} /></td>
+            <td><input className="editable-input" type="number" value={state.manual.subvencionados} onChange={(e) => updateManual("subvencionados", Number(e.target.value))} /></td>
             <td className="num">$ 0</td>
           </tr>
         </tbody>
@@ -218,12 +204,11 @@ const RendicionBlock: React.FC<BlockProps> = ({
         <div>OBSERVACIONES:</div>
         <textarea
           className="obs-textarea editable-area"
-          value={observaciones}
-          onChange={(e) => setObservaciones(e.target.value)}
+          value={state.observaciones}
+          onChange={(e) => updateState({ observaciones: e.target.value })}
         />
       </div>
 
-      {/* SECCIÓN DE FIRMA ACTUALIZADA */}
       <div className="rendicion-firma" style={{ marginTop: 30 }}>
         <div style={{ marginBottom: 8 }}>
           RESPONSABLE: <strong>{user?.displayName || user?.email}</strong>
@@ -245,6 +230,35 @@ const RendicionBlock: React.FC<BlockProps> = ({
 
 const RendicionPage: React.FC = () => {
   const [rows, setRows] = useState<Row[]>([]);
+  
+  // NUEVO: El estado maestro vive aquí en el padre
+  const [sharedState, setSharedState] = useState<RendicionState>({
+    valorMenu: 2500,
+    valorVeggie: 2500,
+    valorCeliaco: 2500,
+    valorAcompMenu: 2500,
+    valorAcompVeggie: 2500,
+    valorMp: 2500,
+    manual: {
+      mpComensales: 0,
+      acompMenuComensales: 0,
+      acompVeggieComensales: 0,
+      subvencionados: 0,
+    },
+    observaciones: "",
+  });
+
+  const updateSharedState = (newState: Partial<RendicionState>) => {
+    setSharedState(prev => ({ ...prev, ...newState }));
+  };
+
+  const updateManualState = (field: keyof RendicionState["manual"], value: number) => {
+    const safeValue = isNaN(value) ? 0 : value;
+    setSharedState(prev => ({
+      ...prev,
+      manual: { ...prev.manual, [field]: safeValue }
+    }));
+  };
 
   useEffect(() => listenTodaySales(setRows), []);
 
@@ -253,10 +267,8 @@ const RendicionPage: React.FC = () => {
       rows.reduce(
         (acc, r: any) => {
           const memberId = (r.member?.id ?? "").trim();
-
           if (
             !r.voided &&
-            // ELIMINAMOS !r.isSubsidized para que los cuente en el físico
             memberId !== "" &&
             (r.itemType === "MENU" ||
               r.itemType === "VEGGIE" ||
@@ -264,7 +276,6 @@ const RendicionPage: React.FC = () => {
           ) {
             acc[r.itemType as "MENU" | "VEGGIE" | "CELIACO"]++;
           }
-
           return acc;
         },
         { MENU: 0, VEGGIE: 0, CELIACO: 0 } as Record<"MENU" | "VEGGIE" | "CELIACO", number>
@@ -283,6 +294,9 @@ const RendicionPage: React.FC = () => {
     totalMenuCaja: viandaCounts.MENU,
     totalVeggieCaja: viandaCounts.VEGGIE,
     totalCeliacoCaja: viandaCounts.CELIACO,
+    state: sharedState,           // PASAMOS EL ESTADO
+    updateState: updateSharedState, // PASAMOS EL ACTUALIZADOR
+    updateManual: updateManualState // PASAMOS EL ACTUALIZADOR MANUAL
   };
 
   return (
