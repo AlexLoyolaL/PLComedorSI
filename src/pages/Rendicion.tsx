@@ -269,6 +269,7 @@ const RendicionPage: React.FC = () => {
           const memberId = (r.member?.id ?? "").trim();
           if (
             !r.voided &&
+            !r.isSubsidized &&
             memberId !== "" &&
             (r.itemType === "MENU" ||
               r.itemType === "VEGGIE" ||
