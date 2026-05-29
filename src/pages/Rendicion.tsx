@@ -9,7 +9,6 @@ import { useAuth } from "../state/AuthContext";
 
 type Row = any;
 
-// NUEVO: Definimos la estructura de todos los estados compartidos
 export type RendicionState = {
   valorMenu: number;
   valorVeggie: number;
@@ -26,34 +25,31 @@ export type RendicionState = {
   observaciones: string;
 };
 
-// NUEVO: Ampliamos las props para recibir el estado y la función para actualizarlo
 type BlockProps = {
+  blockId?: string; // Cambiamos showSaveButton por blockId para el html2canvas
   fechaTexto: string;
   diaSemana: string;
   totalMenuCaja: number;
   totalVeggieCaja: number;
   totalCeliacoCaja: number;
-  showSaveButton?: boolean;
   state: RendicionState;
   updateState: (newState: Partial<RendicionState>) => void;
   updateManual: (field: keyof RendicionState["manual"], value: number) => void;
 };
 
 const RendicionBlock: React.FC<BlockProps> = ({
+  blockId,
   fechaTexto,
   diaSemana,
   totalMenuCaja,
   totalVeggieCaja,
   totalCeliacoCaja,
-  showSaveButton,
-  state,           // RECIBIMOS EL ESTADO COMPARTIDO
-  updateState,     // RECIBIMOS LAS FUNCIONES PARA ACTUALIZAR
+  state,
+  updateState,
   updateManual
 }) => {
-  const [isSaving, setIsSaving] = useState(false);
   const { user } = useAuth();
 
-  // Usamos los valores del estado central
   const menuCalculado = Math.max(0, totalMenuCaja - state.manual.mpComensales - state.manual.acompMenuComensales - state.manual.subvencionados);
   const veggieCalculado = Math.max(0, totalVeggieCaja - state.manual.acompVeggieComensales);
   const celiacoCalculado = totalCeliacoCaja;
@@ -72,58 +68,8 @@ const RendicionBlock: React.FC<BlockProps> = ({
 
   const formatCurrency = (n: number) => n === 0 ? "" : `$ ${n.toLocaleString("es-AR")}`;
 
-  const handleSaveDB = async () => {
-    setIsSaving(true);
-    try {
-      const element = document.getElementById("rendicion-original");
-      if (!element) throw new Error("No se encontró la tabla para imprimir");
-      
-      const canvas = await html2canvas(element, { scale: 2 });
-      const imgData = canvas.toDataURL("image/png");
-      
-      const pdf = new jsPDF("p", "mm", "a4");
-      const pdfWidth = pdf.internal.pageSize.getWidth();
-      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
-      
-      pdf.addImage(imgData, "PNG", 0, 10, pdfWidth, pdfHeight);
-      const pdfBlob = pdf.output("blob");
-
-      const uniqueName = `rendicion_${todayKey()}_${Date.now()}.pdf`;
-      const storageRef = ref(storage, `rendiciones/${uniqueName}`);
-      await uploadBytes(storageRef, pdfBlob);
-      const pdfUrl = await getDownloadURL(storageRef);
-
-      const qtyEfectivo = menuCalculado + veggieCalculado + celiacoCalculado + state.manual.acompMenuComensales + state.manual.acompVeggieComensales;
-      await setDoc(doc(db, "dayAgg", todayKey()), {
-        payments: { cash: qtyEfectivo, mp: state.manual.mpComensales, subvencionados: state.manual.subvencionados },
-        lastUpdated: serverTimestamp()
-      }, { merge: true });
-
-      await setDoc(doc(db, "rendiciones_audit", todayKey()), {
-        dateKey: todayKey(),
-        timestamp: serverTimestamp(),
-        pdfUrl: pdfUrl,
-        observaciones: state.observaciones,
-        totales: {
-          comensalesTotales: totalComensales,
-          efectivoPesos: totalEfectivo,
-          mpPesos: totalMp,
-          qtyEfectivo: qtyEfectivo,
-          qtyMp: state.manual.mpComensales,
-          qtySubvencionados: state.manual.subvencionados
-        }
-      });
-
-      alert("✅ ¡Rendición guardada exitosamente y PDF generado para Auditoría!");
-    } catch (e: any) {
-      alert("Error al guardar: " + e.message);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
   return (
-    <div className="rendicion-card" id={showSaveButton ? "rendicion-original" : ""}>
+    <div className="rendicion-card" id={blockId}>
       <div className="rendicion-header">
         <div className="rendicion-title">COMEDOR PUERTO LIBRE - LIQUIDACION</div>
         <div className="rendicion-subtitle">COOPERADORA JUVENTUD PROLONGADA</div>
@@ -216,22 +162,15 @@ const RendicionBlock: React.FC<BlockProps> = ({
         <div className="firma-line" style={{ borderBottom: '1px solid #000', width: '250px', marginBottom: 4 }} />
         <span style={{ fontSize: 10, color: '#666' }}>FIRMA Y ACLARACIÓN</span>
       </div>
-
-      {showSaveButton && (
-        <div className="screen-only" style={{ marginTop: 20, textAlign: "center" }}>
-          <button className="button" style={{ background: "#10b981" }} onClick={handleSaveDB} disabled={isSaving}>
-            {isSaving ? "Generando PDF y Guardando..." : "Cerrar Turno, Guardar y Generar PDF"}
-          </button>
-        </div>
-      )}
     </div>
   );
 };
 
 const RendicionPage: React.FC = () => {
   const [rows, setRows] = useState<Row[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
+  const [hasSaved, setHasSaved] = useState(false); // Estado para controlar el botón de Imprimir
   
-  // NUEVO: El estado maestro vive aquí en el padre
   const [sharedState, setSharedState] = useState<RendicionState>({
     valorMenu: 2500,
     valorVeggie: 2500,
@@ -248,8 +187,10 @@ const RendicionPage: React.FC = () => {
     observaciones: "",
   });
 
+  // Si modifican algo, bloqueamos la impresión hasta que vuelvan a guardar
   const updateSharedState = (newState: Partial<RendicionState>) => {
     setSharedState(prev => ({ ...prev, ...newState }));
+    setHasSaved(false); 
   };
 
   const updateManualState = (field: keyof RendicionState["manual"], value: number) => {
@@ -258,6 +199,7 @@ const RendicionPage: React.FC = () => {
       ...prev,
       manual: { ...prev.manual, [field]: safeValue }
     }));
+    setHasSaved(false);
   };
 
   useEffect(() => listenTodaySales(setRows), []);
@@ -289,32 +231,113 @@ const RendicionPage: React.FC = () => {
   const dias = ["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
   const diaSemana = dias[now.getDay()];
 
+  const handleSaveDB = async () => {
+    setIsSaving(true);
+    try {
+      const element = document.getElementById("rendicion-original");
+      if (!element) throw new Error("No se encontró la tabla para imprimir");
+      
+      // Recalculamos para la base de datos
+      const menuCalculado = Math.max(0, viandaCounts.MENU - sharedState.manual.mpComensales - sharedState.manual.acompMenuComensales - sharedState.manual.subvencionados);
+      const veggieCalculado = Math.max(0, viandaCounts.VEGGIE - sharedState.manual.acompVeggieComensales);
+      const celiacoCalculado = viandaCounts.CELIACO;
+
+      const recMenu = sharedState.valorMenu * menuCalculado;
+      const recVeggie = sharedState.valorVeggie * veggieCalculado;
+      const recCeliaco = sharedState.valorCeliaco * celiacoCalculado;
+      const recAcompMenu = sharedState.valorAcompMenu * sharedState.manual.acompMenuComensales;
+      const recAcompVeggie = sharedState.valorAcompVeggie * sharedState.manual.acompVeggieComensales;
+      const recMp = sharedState.valorMp * sharedState.manual.mpComensales;
+
+      const totalComensales = viandaCounts.MENU + viandaCounts.VEGGIE + viandaCounts.CELIACO;
+      const totalEfectivo = recMenu + recVeggie + recCeliaco + recAcompMenu + recAcompVeggie;
+      const qtyEfectivo = menuCalculado + veggieCalculado + celiacoCalculado + sharedState.manual.acompMenuComensales + sharedState.manual.acompVeggieComensales;
+
+      const canvas = await html2canvas(element, { scale: 2 });
+      const imgData = canvas.toDataURL("image/png");
+      
+      const pdf = new jsPDF("p", "mm", "a4");
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+      
+      pdf.addImage(imgData, "PNG", 0, 10, pdfWidth, pdfHeight);
+      const pdfBlob = pdf.output("blob");
+
+      const uniqueName = `rendicion_${todayKey()}_${Date.now()}.pdf`;
+      const storageRef = ref(storage, `rendiciones/${uniqueName}`);
+      await uploadBytes(storageRef, pdfBlob);
+      const pdfUrl = await getDownloadURL(storageRef);
+
+      await setDoc(doc(db, "dayAgg", todayKey()), {
+        payments: { cash: qtyEfectivo, mp: sharedState.manual.mpComensales, subvencionados: sharedState.manual.subvencionados },
+        lastUpdated: serverTimestamp()
+      }, { merge: true });
+
+      await setDoc(doc(db, "rendiciones_audit", todayKey()), {
+        dateKey: todayKey(),
+        timestamp: serverTimestamp(),
+        pdfUrl: pdfUrl,
+        observaciones: sharedState.observaciones,
+        totales: {
+          comensalesTotales: totalComensales,
+          efectivoPesos: totalEfectivo,
+          mpPesos: recMp,
+          qtyEfectivo: qtyEfectivo,
+          qtyMp: sharedState.manual.mpComensales,
+          qtySubvencionados: sharedState.manual.subvencionados
+        }
+      });
+
+      setHasSaved(true); // Habilitamos el botón de imprimir
+      alert("✅ ¡Rendición guardada exitosamente y PDF generado para Auditoría!");
+    } catch (e: any) {
+      alert("Error al guardar: " + e.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const blockProps = {
     fechaTexto,
     diaSemana,
     totalMenuCaja: viandaCounts.MENU,
     totalVeggieCaja: viandaCounts.VEGGIE,
     totalCeliacoCaja: viandaCounts.CELIACO,
-    state: sharedState,           // PASAMOS EL ESTADO
-    updateState: updateSharedState, // PASAMOS EL ACTUALIZADOR
-    updateManual: updateManualState // PASAMOS EL ACTUALIZADOR MANUAL
+    state: sharedState,
+    updateState: updateSharedState,
+    updateManual: updateManualState
   };
 
   return (
     <div className="rendicion-wrapper">
-      <div className="rendicion-actions screen-only">
-        <button className="button primary" onClick={() => window.print()}>
-          Imprimir
+      {/* NUEVA BOTONERA SUPERIOR */}
+      <div className="rendicion-actions screen-only" style={{ display: 'flex', gap: '15px', alignItems: 'center', marginBottom: '20px' }}>
+        <button 
+          className="button" 
+          style={{ background: hasSaved ? "#6b7280" : "#10b981", color: "white", padding: "10px 20px" }} 
+          onClick={handleSaveDB} 
+          disabled={isSaving}
+        >
+          {isSaving ? "Guardando y Generando PDF..." : hasSaved ? "✅ Turno Cerrado (Actualizar)" : "1. Cerrar Turno, Guardar y Generar PDF"}
+        </button>
+        
+        <button 
+          className="button primary" 
+          style={{ padding: "10px 20px", opacity: hasSaved ? 1 : 0.5 }}
+          onClick={() => window.print()} 
+          disabled={!hasSaved}
+        >
+          2. Imprimir
         </button>
       </div>
 
       <div className="rendicion-page">
         <div className="rendicion-instance">
-          <RendicionBlock {...blockProps} showSaveButton={true} />
+          <RendicionBlock {...blockProps} blockId="rendicion-original" />
         </div>
 
         <div className="rendicion-instance rendicion-copy">
-          <RendicionBlock {...blockProps} showSaveButton={false} />
+          <RendicionBlock {...blockProps} />
         </div>
       </div>
     </div>
