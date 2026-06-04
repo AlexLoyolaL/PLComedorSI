@@ -10,7 +10,7 @@ import {
   updateSaleTx,
 } from "../lib/sales";
 import { Card } from "../ui/Card";
-import { doc, onSnapshot, collection, getDoc } from "firebase/firestore"; // NUEVO: Importamos getDoc
+import { doc, onSnapshot, collection, getDoc } from "firebase/firestore";
 import { db } from "../firebase";
 
 type Row = {
@@ -23,7 +23,7 @@ type Row = {
   allowDouble: boolean;
   voided: boolean;
   manual?: boolean;
-  isSubsidized?: boolean; // NUEVO: Para saber si dibujamos el regalito en la tabla
+  isSubsidized?: boolean;
 };
 
 type OrderData = {
@@ -53,8 +53,6 @@ export default function Caja() {
 
   const [memberId, setMemberId] = useState("");
   const [order, setOrder] = useState<OrderData | null>(null);
-  
-  // NUEVO: Estado para mostrar el cartel de subvencionado
   const [isSubsidized, setIsSubsidized] = useState(false);
 
   const [isLoading, setIsLoading] = useState(false);
@@ -72,10 +70,13 @@ export default function Caja() {
   const ready = useMemo(() => !!memberId && !!order, [memberId, order]);
 
   const [rows, setRows] = useState<Row[]>([]);
-  const [searchSocio, setSearchSocio] = useState("");
   const [manualAdds, setManualAdds] = useState<any[]>([]);
-
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  // ESTADOS DE LOS NUEVOS FILTROS VISUALES
+  const [searchSocio, setSearchSocio] = useState("");
+  const [filterTable, setFilterTable] = useState("");
+  const [filterSubsidized, setFilterSubsidized] = useState(false);
 
   useEffect(() => {
     const goOnline = () => setIsOnline(true);
@@ -105,17 +106,28 @@ export default function Caja() {
     return () => unsub();
   }, []);
 
+  // EL NUEVO COLADOR MATEMÁTICO (TRIPLE FILTRO)
   const filteredRows = useMemo(() => {
-    const base = rows.filter((r) => !r.manual);
+    let base = rows.filter((r) => !r.manual);
+
+    if (filterSubsidized) {
+      base = base.filter((r) => r.isSubsidized);
+    }
+
+    if (filterTable) {
+      base = base.filter((r) => r.destination?.table === filterTable);
+    }
 
     const q = searchSocio.trim().toLowerCase();
-    if (!q) return base;
+    if (q) {
+      base = base.filter((r) => {
+        const id = (r.member?.id ?? "").toLowerCase();
+        return id.includes(q);
+      });
+    }
 
-    return base.filter((r) => {
-      const id = (r.member?.id ?? "").toLowerCase();
-      return id.includes(q);
-    });
-  }, [rows, searchSocio]);
+    return base;
+  }, [rows, searchSocio, filterSubsidized, filterTable]);
 
   const viandaCounts = useMemo(
     () =>
@@ -214,30 +226,26 @@ export default function Caja() {
     } catch {}
   }
 
-  // Modificamos la función para que reciba el texto exacto escaneado
   async function handleSocioEnter(scannedText: string) {
-    // Si el texto está vacío (un Enter accidental), ignoramos
     if (!scannedText || scannedText.trim() === "") return;
 
     try {
       const { memberId } = parseMemberQR(scannedText);
       
-      // EL SEGURO: Si la lógica no pudo extraer un ID válido, cortamos acá
       if (!memberId || memberId.trim() === "") {
         setMsg("No se detectó un ID válido en el carnet.");
         beep(false);
         return;
       }
 
-      setMemberId(memberId); // Guardamos para la UI
+      setMemberId(memberId);
       setMsg("");
 
-      // Ahora sí, con un ID 100% seguro y garantizado, buscamos en Firebase
       try {
         const subSnap = await getDoc(doc(db, "subsidized_members", memberId));
         setIsSubsidized(subSnap.exists() && subSnap.data()?.active === true);
       } catch (e) {
-        setIsSubsidized(false); // Falla silenciosa si no hay internet
+        setIsSubsidized(false);
       }
 
       pedidoRef.current?.focus();
@@ -313,7 +321,6 @@ export default function Caja() {
       lastScansRef.current.set(memberId, Date.now());
 
       beep(true);
-      // NUEVO: Limpiamos todo, incluyendo el cartel de subvención
       setMemberInput("");
       setOrderInput("");
       setMemberId("");
@@ -422,21 +429,18 @@ export default function Caja() {
                 if (hasEnter(v)) {
                   const clean = v.replace(/[\r\n]+/g, " ").trim();
                   setMemberInput(clean);
-                  // Le pasamos el texto limpio DIRECTO, sin esperar a React
                   handleSocioEnter(clean); 
                 }
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === "NumpadEnter") {
                   e.preventDefault();
-                  // Si apretan Enter manual
                   handleSocioEnter(memberInput); 
                 }
               }}
             />
             <div style={{ display: 'flex', alignItems: 'center' }}>
               Socio: <b>{memberId || "-"}</b>
-              {/* NUEVO: Cartelito Azul Inconfundible */}
               {isSubsidized && (
                 <span style={{ 
                   marginLeft: 12, background: '#3b82f6', color: '#fff', 
@@ -547,7 +551,7 @@ export default function Caja() {
                 setOrderInput("");
                 setMemberId("");
                 setOrder(null);
-                setIsSubsidized(false); // NUEVO: Se limpia si tocan Cancelar
+                setIsSubsidized(false);
                 setMsg("");
                 setDupInfo({ needed: false, message: "" });
                 socioRef.current?.focus();
@@ -622,20 +626,44 @@ export default function Caja() {
         </Card>
 
         <Card title={`Resumen hoy ${todayKey()}`}>
-          <div style={{ marginBottom: 8 }}>
+          <div style={{ marginBottom: 12, display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
             <input
               type="text"
-              placeholder="Buscar socio por nombre o DNI..."
+              placeholder="Buscar socio..."
               value={searchSocio}
               onChange={(e) => setSearchSocio(e.target.value)}
               style={{
-                width: "100%",
+                flex: "1 1 150px",
                 padding: 6,
                 fontSize: 14,
                 boxSizing: "border-box",
               }}
             />
+            
+            {/* NUEVO: Filtro desplegable de Mesas */}
+            <select
+              value={filterTable}
+              onChange={(e) => setFilterTable(e.target.value)}
+              style={{ padding: 6, fontSize: 14, borderRadius: 4 }}
+            >
+              <option value="">Todas las mesas</option>
+              {Array.from({ length: 34 }, (_, i) => {
+                const val = `MESA ${String(i + 1).padStart(2, "0")}`;
+                return <option key={val} value={val}>{val}</option>;
+              })}
+            </select>
+            
+            {/* NUEVO: Checkbox de Subvencionados */}
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer", fontWeight: 600 }}>
+              <input
+                type="checkbox"
+                checked={filterSubsidized}
+                onChange={(e) => setFilterSubsidized(e.target.checked)}
+              />
+              Solo Subvencionados 🎁
+            </label>
           </div>
+
           <p style={{ marginTop: 0, color: "var(--muted)" }}>
             Listado en vivo (últimas 100). Podés editar rápido o anular.
           </p>
@@ -658,7 +686,6 @@ export default function Caja() {
                     <td>{r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : ""}</td>
                     <td>
                       {r.member?.id}
-                      {/* NUEVO: Iconito de regalo en la tabla para los subvencionados */}
                       {r.isSubsidized && (
                         <span title="Subvencionado" style={{ marginLeft: 6, fontSize: 12 }}>🎁</span>
                       )}
