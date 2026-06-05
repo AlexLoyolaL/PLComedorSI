@@ -24,6 +24,7 @@ type Row = {
   voided: boolean;
   manual?: boolean;
   isSubsidized?: boolean;
+  paymentMethod?: "EFECTIVO" | "MP" | "SUBVENCIONADO"; // <-- NUEVO CAMPO
 };
 
 type OrderData = {
@@ -40,6 +41,7 @@ export default function Caja() {
 
   const [memberInput, setMemberInput] = useState("");
   const [orderInput, setOrderInput] = useState("");
+  const [paymentInput, setPaymentInput] = useState(""); // <-- NUEVO ESTADO
 
   const [limits, setLimits] = useState<{
     MENU: number | null;
@@ -54,6 +56,7 @@ export default function Caja() {
   const [memberId, setMemberId] = useState("");
   const [order, setOrder] = useState<OrderData | null>(null);
   const [isSubsidized, setIsSubsidized] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<"EFECTIVO" | "MP" | "SUBVENCIONADO" | null>(null); // <-- NUEVO ESTADO
 
   const [isLoading, setIsLoading] = useState(false);
   const lastScansRef = useRef<Map<string, number>>(new Map());
@@ -66,6 +69,7 @@ export default function Caja() {
 
   const socioRef = useRef<HTMLInputElement>(null);
   const pedidoRef = useRef<HTMLInputElement>(null);
+  const pagoRef = useRef<HTMLInputElement>(null); // <-- NUEVA REF
 
   const ready = useMemo(() => !!memberId && !!order, [memberId, order]);
 
@@ -226,6 +230,7 @@ export default function Caja() {
     } catch {}
   }
 
+  // --- PASO 1 ---
   async function handleSocioEnter(scannedText: string) {
     if (!scannedText || scannedText.trim() === "") return;
 
@@ -256,29 +261,73 @@ export default function Caja() {
     }
   }
 
+  // --- PASO 2 ---
   function handlePedidoEnter() {
     try {
       const p = parseOrderQR(orderInput);
       setOrder(p);
       setMsg("");
-      confirmIfReady(false, p);
+      
+      // LÓGICA CONDICIONAL DE PAGO
+      if (isSubsidized) {
+        setPaymentMethod("SUBVENCIONADO");
+        confirmIfReady(false, p, "SUBVENCIONADO"); // Guarda solo si es gratis
+      } else {
+        setTimeout(() => pagoRef.current?.focus(), 50); // Salta al pago si no es gratis
+      }
     } catch (e: any) {
       setMsg(e.message); beep(false);
     }
   }
 
+  // --- PASO 3 (NUEVO) ---
+  function handlePagoEnter(scannedText: string) {
+    if (!scannedText || scannedText.trim() === "") return;
+    const clean = scannedText.trim().toUpperCase();
+    let method: "EFECTIVO" | "MP" | null = null;
+
+    if (clean.includes("EFECTIVO")) {
+      method = "EFECTIVO";
+    } else if (clean.includes("MP") || clean.includes("MERCADO")) {
+      method = "MP";
+    }
+
+    if (method) {
+      setPaymentMethod(method);
+      setMsg("");
+      // CONFIRMACIÓN AUTOMÁTICA
+      confirmIfReady(false, order!, method);
+    } else {
+      setMsg("⚠️ QR inválido. Escaneá PAGO-EFECTIVO o PAGO-MP."); 
+      beep(false);
+      setPaymentInput("");
+    }
+  }
+
+  // --- PASO 4 ---
   async function confirmIfReady(
     allowDouble: boolean,
     orderOverride?: {
       itemType: "MENU" | "VEGGIE" | "CELIACO";
       dest: { mode: "COMEDOR" | "VIANDA"; table: string | null };
-    }
+    },
+    paymentOverride?: "EFECTIVO" | "MP" | "SUBVENCIONADO"
   ) {
     if (isLoading) return;
 
     const currentOrder = orderOverride ?? order;
+    const finalPayment = paymentOverride ?? paymentMethod;
 
     if (!user || !currentOrder || !memberId) return;
+
+    // VALIDACIÓN DE PAGO
+    if (!isSubsidized && !finalPayment) {
+      setMsg("Falta escanear el método de pago (EFECTIVO o MERCADOPAGO)."); 
+      beep(false);
+      pagoRef.current?.focus(); 
+      return;
+    }
+
     setMsg("");
     setDupInfo({ needed: false, message: "" });
 
@@ -316,16 +365,20 @@ export default function Caja() {
         itemType: currentOrder.itemType,
         dest: currentOrder.dest,
         allowDouble,
+        paymentMethod: finalPayment as any // <-- PASAMOS EL MEDIO DE PAGO
       });
 
       lastScansRef.current.set(memberId, Date.now());
 
       beep(true);
+      // RESET COMPLETO
       setMemberInput("");
       setOrderInput("");
+      setPaymentInput("");
       setMemberId("");
       setOrder(null);
       setIsSubsidized(false);
+      setPaymentMethod(null);
       
       setTimeout(() => {
         if (socioRef.current) {
@@ -353,7 +406,7 @@ export default function Caja() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dupInfo.needed, memberId, order, isLoading]);
+  }, [dupInfo.needed, memberId, order, isLoading, paymentMethod]);
 
   async function anular(id: string) {
     try { await voidSaleTx(id, true, "Anulada por administrativo"); }
@@ -490,9 +543,43 @@ export default function Caja() {
           </div>
         </Card>
 
+        {/* --- NUEVO: PASO 3 CONDICIONAL --- */}
+        {!isSubsidized && (
+          <Card title="3) Escanear Pago (QR)">
+            <div style={{ display: "grid", gap: 8 }}>
+              <input
+                ref={pagoRef}
+                className="input"
+                disabled={isLoading || !order}
+                placeholder="Escaneá PAGO-EFECTIVO o PAGO-MP"
+                value={paymentInput}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setPaymentInput(v);
+                  if (hasEnter(v)) {
+                    const clean = v.replace(/[\r\n]+/g, " ").trim();
+                    setPaymentInput(clean);
+                    handlePagoEnter(clean);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === "NumpadEnter") {
+                    e.preventDefault();
+                    handlePagoEnter(paymentInput);
+                  }
+                }}
+              />
+              <div>
+                Medio: <b>{paymentMethod || "-"}</b>
+              </div>
+            </div>
+          </Card>
+        )}
+
+        {/* --- PASO 4 (El antiguo Paso 3) --- */}
         <Card
-          title="3) Confirmar"
-          right={<span style={{ color: "#9aa4c0" }}>Enter en “Pedido” confirma.</span>}
+          title={isSubsidized ? "3) Confirmar" : "4) Confirmar (Opcional si escaneó)"}
+          right={<span style={{ color: "#9aa4c0" }}>Enter en “Pago” confirma.</span>}
         >
           {dupInfo.needed ? (
             <div
@@ -541,7 +628,7 @@ export default function Caja() {
               disabled={!ready || isLoading}
               onClick={() => confirmIfReady(false)}
             >
-              {isLoading ? "Procesando..." : "Confirmar venta"}
+              {isLoading ? "Procesando..." : "Guardar Manualmente"}
             </button>
             <button
               className="button outline"
@@ -549,9 +636,11 @@ export default function Caja() {
               onClick={() => {
                 setMemberInput("");
                 setOrderInput("");
+                setPaymentInput(""); // <-- NUEVO
                 setMemberId("");
                 setOrder(null);
                 setIsSubsidized(false);
+                setPaymentMethod(null); // <-- NUEVO
                 setMsg("");
                 setDupInfo({ needed: false, message: "" });
                 socioRef.current?.focus();
@@ -640,7 +729,6 @@ export default function Caja() {
               }}
             />
             
-            {/* NUEVO: Filtro desplegable de Mesas */}
             <select
               value={filterTable}
               onChange={(e) => setFilterTable(e.target.value)}
@@ -653,7 +741,6 @@ export default function Caja() {
               })}
             </select>
             
-            {/* NUEVO: Checkbox de Subvencionados */}
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer", fontWeight: 600 }}>
               <input
                 type="checkbox"
@@ -686,11 +773,21 @@ export default function Caja() {
                     <td>{r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : ""}</td>
                     <td>
                       {r.member?.id}
+                      {/* EMOJI DE SUBVENCIONADO */}
                       {r.isSubsidized && (
                         <span title="Subvencionado" style={{ marginLeft: 6, fontSize: 12 }}>🎁</span>
                       )}
                     </td>
-                    <td>{r.itemType}</td>
+                    <td>
+                      {r.itemType}
+                      {/* EMOJIS DE MEDIOS DE PAGO */}
+                      {!r.isSubsidized && r.paymentMethod === "EFECTIVO" && (
+                        <span title="Efectivo" style={{ marginLeft: 6, fontSize: 12 }}>💵</span>
+                      )}
+                      {!r.isSubsidized && r.paymentMethod === "MP" && (
+                        <span title="Mercado Pago" style={{ marginLeft: 6, fontSize: 12 }}>📱</span>
+                      )}
+                    </td>
                     <td>{r.destination?.mode}</td>
                     <td>{r.destination?.table ?? "-"}</td>
                     <td>{r.seller?.email}</td>

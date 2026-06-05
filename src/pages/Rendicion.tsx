@@ -17,21 +17,21 @@ export type RendicionState = {
   valorAcompVeggie: number;
   valorMp: number;
   manual: {
-    mpComensales: number;
     acompMenuComensales: number;
     acompVeggieComensales: number;
-    subvencionados: number;
+    subvencionados: number; // Esto es el "Extra sin cargo" manual
   };
   observaciones: string;
 };
 
 type BlockProps = {
-  blockId?: string; // Cambiamos showSaveButton por blockId para el html2canvas
+  blockId?: string;
   fechaTexto: string;
   diaSemana: string;
   totalMenuCaja: number;
   totalVeggieCaja: number;
   totalCeliacoCaja: number;
+  totalMpCaja: number; // Automático desde la BD
   state: RendicionState;
   updateState: (newState: Partial<RendicionState>) => void;
   updateManual: (field: keyof RendicionState["manual"], value: number) => void;
@@ -44,13 +44,15 @@ const RendicionBlock: React.FC<BlockProps> = ({
   totalMenuCaja,
   totalVeggieCaja,
   totalCeliacoCaja,
+  totalMpCaja,
   state,
   updateState,
   updateManual
 }) => {
   const { user } = useAuth();
 
-  const menuCalculado = Math.max(0, totalMenuCaja - state.manual.mpComensales - state.manual.acompMenuComensales - state.manual.subvencionados);
+  // ALGORITMO DE CAJA: Descuenta los MP automáticos y los extras manuales
+  const menuCalculado = Math.max(0, totalMenuCaja - totalMpCaja - state.manual.acompMenuComensales - state.manual.subvencionados);
   const veggieCalculado = Math.max(0, totalVeggieCaja - state.manual.acompVeggieComensales);
   const celiacoCalculado = totalCeliacoCaja;
 
@@ -60,7 +62,7 @@ const RendicionBlock: React.FC<BlockProps> = ({
   
   const recAcompMenu = state.valorAcompMenu * state.manual.acompMenuComensales;
   const recAcompVeggie = state.valorAcompVeggie * state.manual.acompVeggieComensales;
-  const recMp = state.valorMp * state.manual.mpComensales;
+  const recMp = state.valorMp * totalMpCaja;
 
   const totalComensales = totalMenuCaja + totalVeggieCaja + totalCeliacoCaja;
   const totalEfectivo = recMenu + recVeggie + recCeliaco + recAcompMenu + recAcompVeggie;
@@ -113,7 +115,8 @@ const RendicionBlock: React.FC<BlockProps> = ({
           <tr>
             <td>PAGOS MERCADO PAGO</td>
             <td><input className="editable-input" type="number" value={state.valorMp} onChange={(e) => updateState({ valorMp: Number(e.target.value) })} /></td>
-            <td><input className="editable-input" type="number" value={state.manual.mpComensales} onChange={(e) => updateManual("mpComensales", Number(e.target.value))} /></td>
+            {/* Campo Grisado Automático */}
+            <td><input type="number" value={totalMpCaja} readOnly style={{ background: "#f3f4f6" }} /></td>
             <td className="num">{formatCurrency(recMp)}</td>
           </tr>
 
@@ -134,6 +137,7 @@ const RendicionBlock: React.FC<BlockProps> = ({
           <tr>
             <td style={{ color: "#3b82f6", fontWeight: "bold" }}>Extra sin cargo</td>
             <td>$ 0</td>
+            {/* Vuelve a ser un campo editable manual */}
             <td><input className="editable-input" type="number" value={state.manual.subvencionados} onChange={(e) => updateManual("subvencionados", Number(e.target.value))} /></td>
             <td className="num">$ 0</td>
           </tr>
@@ -169,7 +173,7 @@ const RendicionBlock: React.FC<BlockProps> = ({
 const RendicionPage: React.FC = () => {
   const [rows, setRows] = useState<Row[]>([]);
   const [isSaving, setIsSaving] = useState(false);
-  const [hasSaved, setHasSaved] = useState(false); // Estado para controlar el botón de Imprimir
+  const [hasSaved, setHasSaved] = useState(false); 
   
   const [sharedState, setSharedState] = useState<RendicionState>({
     valorMenu: 2500,
@@ -179,7 +183,6 @@ const RendicionPage: React.FC = () => {
     valorAcompVeggie: 2500,
     valorMp: 2500,
     manual: {
-      mpComensales: 0,
       acompMenuComensales: 0,
       acompVeggieComensales: 0,
       subvencionados: 0,
@@ -187,7 +190,6 @@ const RendicionPage: React.FC = () => {
     observaciones: "",
   });
 
-  // Si modifican algo, bloqueamos la impresión hasta que vuelvan a guardar
   const updateSharedState = (newState: Partial<RendicionState>) => {
     setSharedState(prev => ({ ...prev, ...newState }));
     setHasSaved(false); 
@@ -204,27 +206,28 @@ const RendicionPage: React.FC = () => {
 
   useEffect(() => listenTodaySales(setRows), []);
 
-  const viandaCounts = useMemo(
-    () =>
-      rows.reduce(
-        (acc, r: any) => {
-          const memberId = (r.member?.id ?? "").trim();
-          if (
-            !r.voided &&
-            !r.isSubsidized &&
-            memberId !== "" &&
-            (r.itemType === "MENU" ||
-              r.itemType === "VEGGIE" ||
-              r.itemType === "CELIACO")
-          ) {
-            acc[r.itemType as "MENU" | "VEGGIE" | "CELIACO"]++;
-          }
-          return acc;
-        },
-        { MENU: 0, VEGGIE: 0, CELIACO: 0 } as Record<"MENU" | "VEGGIE" | "CELIACO", number>
-      ),
-    [rows]
-  );
+  // FILTRO: Ignoramos los formales de Gabinete Social y contamos el resto
+  const autoCounts = useMemo(() => {
+    let menuPaid = 0, veggiePaid = 0, celiacoPaid = 0;
+    let mpTotal = 0;
+
+    rows.forEach((r: any) => {
+      const memberId = (r.member?.id ?? "").trim();
+      // Ignoramos anulados, los que no tienen ID, y a los subvencionados del Gabinete
+      if (!r.voided && memberId !== "" && !r.isSubsidized) {
+        
+        if (r.itemType === "MENU") menuPaid++;
+        if (r.itemType === "VEGGIE") veggiePaid++;
+        if (r.itemType === "CELIACO") celiacoPaid++;
+
+        if (r.paymentMethod === "MP") {
+          mpTotal++;
+        }
+      }
+    });
+
+    return { menuPaid, veggiePaid, celiacoPaid, mpTotal };
+  }, [rows]);
 
   const now = new Date();
   const fechaTexto = now.toLocaleDateString("es-AR");
@@ -237,19 +240,18 @@ const RendicionPage: React.FC = () => {
       const element = document.getElementById("rendicion-original");
       if (!element) throw new Error("No se encontró la tabla para imprimir");
       
-      // Recalculamos para la base de datos
-      const menuCalculado = Math.max(0, viandaCounts.MENU - sharedState.manual.mpComensales - sharedState.manual.acompMenuComensales - sharedState.manual.subvencionados);
-      const veggieCalculado = Math.max(0, viandaCounts.VEGGIE - sharedState.manual.acompVeggieComensales);
-      const celiacoCalculado = viandaCounts.CELIACO;
+      const menuCalculado = Math.max(0, autoCounts.menuPaid - autoCounts.mpTotal - sharedState.manual.acompMenuComensales - sharedState.manual.subvencionados);
+      const veggieCalculado = Math.max(0, autoCounts.veggiePaid - sharedState.manual.acompVeggieComensales);
+      const celiacoCalculado = autoCounts.celiacoPaid;
 
       const recMenu = sharedState.valorMenu * menuCalculado;
       const recVeggie = sharedState.valorVeggie * veggieCalculado;
       const recCeliaco = sharedState.valorCeliaco * celiacoCalculado;
       const recAcompMenu = sharedState.valorAcompMenu * sharedState.manual.acompMenuComensales;
       const recAcompVeggie = sharedState.valorAcompVeggie * sharedState.manual.acompVeggieComensales;
-      const recMp = sharedState.valorMp * sharedState.manual.mpComensales;
+      const recMp = sharedState.valorMp * autoCounts.mpTotal;
 
-      const totalComensales = viandaCounts.MENU + viandaCounts.VEGGIE + viandaCounts.CELIACO;
+      const totalComensales = autoCounts.menuPaid + autoCounts.veggiePaid + autoCounts.celiacoPaid;
       const totalEfectivo = recMenu + recVeggie + recCeliaco + recAcompMenu + recAcompVeggie;
       const qtyEfectivo = menuCalculado + veggieCalculado + celiacoCalculado + sharedState.manual.acompMenuComensales + sharedState.manual.acompVeggieComensales;
 
@@ -269,7 +271,7 @@ const RendicionPage: React.FC = () => {
       const pdfUrl = await getDownloadURL(storageRef);
 
       await setDoc(doc(db, "dayAgg", todayKey()), {
-        payments: { cash: qtyEfectivo, mp: sharedState.manual.mpComensales, subvencionados: sharedState.manual.subvencionados },
+        payments: { cash: qtyEfectivo, mp: autoCounts.mpTotal, extraSinCargoManual: sharedState.manual.subvencionados },
         lastUpdated: serverTimestamp()
       }, { merge: true });
 
@@ -283,12 +285,12 @@ const RendicionPage: React.FC = () => {
           efectivoPesos: totalEfectivo,
           mpPesos: recMp,
           qtyEfectivo: qtyEfectivo,
-          qtyMp: sharedState.manual.mpComensales,
-          qtySubvencionados: sharedState.manual.subvencionados
+          qtyMp: autoCounts.mpTotal,
+          qtyExtraSinCargo: sharedState.manual.subvencionados
         }
       });
 
-      setHasSaved(true); // Habilitamos el botón de imprimir
+      setHasSaved(true); 
       alert("✅ ¡Rendición guardada exitosamente y PDF generado para Auditoría!");
     } catch (e: any) {
       alert("Error al guardar: " + e.message);
@@ -300,9 +302,10 @@ const RendicionPage: React.FC = () => {
   const blockProps = {
     fechaTexto,
     diaSemana,
-    totalMenuCaja: viandaCounts.MENU,
-    totalVeggieCaja: viandaCounts.VEGGIE,
-    totalCeliacoCaja: viandaCounts.CELIACO,
+    totalMenuCaja: autoCounts.menuPaid,
+    totalVeggieCaja: autoCounts.veggiePaid,
+    totalCeliacoCaja: autoCounts.celiacoPaid,
+    totalMpCaja: autoCounts.mpTotal,
     state: sharedState,
     updateState: updateSharedState,
     updateManual: updateManualState
@@ -310,7 +313,6 @@ const RendicionPage: React.FC = () => {
 
   return (
     <div className="rendicion-wrapper">
-      {/* NUEVA BOTONERA SUPERIOR */}
       <div className="rendicion-actions screen-only" style={{ display: 'flex', gap: '15px', alignItems: 'center', marginBottom: '20px' }}>
         <button 
           className="button" 

@@ -148,13 +148,14 @@ export async function ensureDaySettings() {
   });
 }
 
-// ---------- ALTA DE VENTA (VERSIÓN OFFLINE-READY + SUBVENCIONADOS) ----------
+// ---------- ALTA DE VENTA (VERSIÓN OFFLINE-READY + SUBVENCIONADOS Y MEDIOS DE PAGO) ----------
 export async function createSaleTx(params: {
   seller: { uid: string; email: string; name: string };
   memberId: string;
   itemType: ItemType;
   dest: Destination;
   allowDouble: boolean;
+  paymentMethod: "EFECTIVO" | "MP" | "SUBVENCIONADO"; // <-- NUEVO: Recibimos el pago
 }) {
   const key = todayKey();
   const settingsRef = doc(db, "settings_day", key);
@@ -206,6 +207,9 @@ export async function createSaleTx(params: {
   // Es subvencionado si está activo y (no tiene fecha O la fecha es mayor a hoy)
   const isSubsidized = subData?.active === true && (!expiresAt || now.isBefore(expiresAt));
 
+  // NUEVO: Sobreescribimos el método de pago si el sistema sabe que es gratis
+  const finalPaymentMethod = isSubsidized ? "SUBVENCIONADO" : params.paymentMethod;
+
   // 6) Validación de límites diarios (Seguro offline)
   const aggSnap = await getOfflineSafe(aggRef);
   const baseAgg = aggSnap.exists() ? (aggSnap.data() as any) : {
@@ -241,6 +245,7 @@ export async function createSaleTx(params: {
     destination: params.dest,
     allowDouble: !!params.allowDouble,
     isSubsidized, // <-- MARCAMOS LA VENTA COMO SUBVENCIONADA
+    paymentMethod: finalPaymentMethod, // <-- GUARDAMOS EL MÉTODO DE PAGO
     voided: false,
     voidReason: null,
     voidedBy: null,
@@ -257,7 +262,7 @@ export async function createSaleTx(params: {
     lastTs: serverTimestamp() 
   }, { merge: true });
 
-  // 10) Actualizar Agregados de Cocina
+  // 10) Actualizar Agregados de Cocina y Finanzas
   const upd: any = { lastUpdated: serverTimestamp() };
   
   if (params.dest.mode === "COMEDOR") {
@@ -270,10 +275,12 @@ export async function createSaleTx(params: {
     upd.vianda = { [params.itemType]: increment(1) };
   }
 
-  // NUEVO: Agregación Financiera para Auditoría
+  // NUEVO: Agregación Financiera Desglosada
   upd.financial = {
     paid: increment(isSubsidized ? 0 : 1),
-    subsidized: increment(isSubsidized ? 1 : 0)
+    subsidized: increment(isSubsidized ? 1 : 0),
+    efectivo: increment(finalPaymentMethod === "EFECTIVO" ? 1 : 0),
+    mp: increment(finalPaymentMethod === "MP" ? 1 : 0)
   };
 
   setDoc(aggRef, upd, { merge: true });
@@ -292,7 +299,7 @@ export function listenTodaySales(setter: (rows: any[]) => void) {
   });
 }
 
-// ---------- ANULAR VENTA (VERSIÓN OFFLINE-READY) ----------
+// ---------- ANULAR VENTA (VERSIÓN OFFLINE-READY Y FINANZAS) ----------
 export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
   const key = todayKey();
   const saleRef = doc(db, "sales", id);
@@ -318,10 +325,12 @@ export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
     upd.vianda = { [sale.itemType]: increment(sign) };
   }
 
-  // NUEVO: Ajuste Financiero
+  // NUEVO: Reversión Financiera Desglosada
   upd.financial = {
     paid: increment(sale.isSubsidized ? 0 : sign),
-    subsidized: increment(sale.isSubsidized ? sign : 0)
+    subsidized: increment(sale.isSubsidized ? sign : 0),
+    efectivo: increment(sale.paymentMethod === "EFECTIVO" ? sign : 0),
+    mp: increment(sale.paymentMethod === "MP" ? sign : 0)
   };
 
   setDoc(aggRef, upd, { merge: true });
@@ -334,7 +343,7 @@ export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
   }
 }
 
-// ---------- EDITAR VENTA (VERSIÓN OFFLINE-READY) ----------
+// ---------- EDITAR VENTA (VERSIÓN OFFLINE-READY + PATOVICA DE MESAS) ----------
 export async function updateSaleTx(params: { saleId: string; newItemType: ItemType; newDest: Destination; }) {
   const key = todayKey();
   const saleRef = doc(db, "sales", params.saleId);
@@ -348,6 +357,23 @@ export async function updateSaleTx(params: { saleId: string; newItemType: ItemTy
   if (params.newDest.mode === "COMEDOR") {
     if (!params.newDest.table) throw new Error("Mesa obligatoria en COMEDOR");
     if (!mesaOk(params.newItemType, params.newDest.table)) throw new Error("Mesa inválida.");
+  }
+
+  // EL PATOVICA: Validación estricta de ocupación de mesa
+  if (params.newDest.mode === "COMEDOR") {
+    const isMovingToNewTable = sale.destination.mode !== "COMEDOR" || sale.destination.table !== params.newDest.table;
+    if (isMovingToNewTable) {
+      const aggSnap = await getDoc(aggRef).catch(() => null);
+      if (aggSnap && aggSnap.exists()) {
+        const aggData = aggSnap.data() as any;
+        const targetTableKey = tableKey(params.newDest.table)!;
+        const currentOccupants = aggData.comedor?.byTable?.[targetTableKey] || 0;
+        const maxCapacity = tableCapacityFromKey(targetTableKey);
+        if (currentOccupants >= maxCapacity) {
+          throw new Error(`¡La ${tableLabelFromKey(targetTableKey)} ya está llena (${currentOccupants}/${maxCapacity})! Operación rechazada.`);
+        }
+      }
+    }
   }
 
   // Calculamos la diferencia neta para no pisar datos
@@ -400,7 +426,7 @@ export async function updateSaleTx(params: { saleId: string; newItemType: ItemTy
   setDoc(saleRef, { itemType: params.newItemType, destination: params.newDest, updatedAt: serverTimestamp() }, { merge: true });
 }
 
-// ---------- Reconstruir agregado del día desde sales ----------
+// ---------- Reconstruir agregado del día desde sales (AUDITORÍA FINANCIERA) ----------
 export async function rebuildTodayAggFromSales() {
   const key = todayKey();
   const q = query(collection(db, "sales"), where("dateKey", "==", key));
@@ -418,7 +444,7 @@ export async function rebuildTodayAggFromSales() {
       VEGGIE: 0,
       CELIACO: 0,
     },
-    financial: { paid: 0, subsidized: 0 } // NUEVO
+    financial: { paid: 0, subsidized: 0, efectivo: 0, mp: 0 } // NUEVO
   };
 
   snap.forEach((d) => {
@@ -446,10 +472,12 @@ export async function rebuildTodayAggFromSales() {
       agg.financial.subsidized += 1;
     } else {
       agg.financial.paid += 1;
+      if (r.paymentMethod === "EFECTIVO") agg.financial.efectivo += 1;
+      if (r.paymentMethod === "MP") agg.financial.mp += 1;
     }
   });
 
-  // Usamos merge: true para no borrar los datos de pagos (Efectivo/MP) guardados
+  // Usamos merge: true para no borrar otros datos históricos
   await setDoc(doc(db, "dayAgg", key), agg, { merge: true });
 }
 
@@ -550,6 +578,7 @@ export async function addManualViandas(params: AddManualViandasParams) {
         manual: true,
         manualConcept: concept,
         manualNote: note ?? "",
+        paymentMethod: "SUBVENCIONADO" // Por defecto, las manuales no suman al efectivo
       });
     }
   });
