@@ -155,7 +155,7 @@ export async function createSaleTx(params: {
   itemType: ItemType;
   dest: Destination;
   allowDouble: boolean;
-  paymentMethod: "EFECTIVO" | "MP" | "SUBVENCIONADO"; // <-- NUEVO: Recibimos el pago
+  paymentMethod: "EFECTIVO" | "MP" | "SUBVENCIONADO" | "LOTE_PREPAGO"; // <-- INYECTADO: Nuevo medio de pago
 }) {
   const key = todayKey();
   const settingsRef = doc(db, "settings_day", key);
@@ -164,6 +164,7 @@ export async function createSaleTx(params: {
   
   // ¡AQUÍ ESTÁ LA VARIABLE CLAVE PARA EL GABINETE!
   const subRef = doc(db, "subsidized_members", params.memberId);
+  const memberRef = doc(db, "members", params.memberId); // <-- INYECTADO: Referencia a la BD del socio
 
   // Función auxiliar para leer documentos sin que explote estando offline
   async function getOfflineSafe(ref: any) {
@@ -207,8 +208,18 @@ export async function createSaleTx(params: {
   // Es subvencionado si está activo y (no tiene fecha O la fecha es mayor a hoy)
   const isSubsidized = subData?.active === true && (!expiresAt || now.isBefore(expiresAt));
 
-  // NUEVO: Sobreescribimos el método de pago si el sistema sabe que es gratis
-  const finalPaymentMethod = isSubsidized ? "SUBVENCIONADO" : params.paymentMethod;
+  // --- INYECTADO: LÓGICA DE LOTE PREPAGO ---
+  const memberSnap = await getOfflineSafe(memberRef);
+  const memberData = memberSnap.exists() ? (memberSnap.data() as any) : null;
+  const bundle = memberData?.active_bundle;
+  const bundleExpiresAt = bundle?.expiresAt ? dayjs(bundle.expiresAt.toDate()) : null;
+  const hasActiveBundle = bundle && bundle.remaining > 0 && (!bundleExpiresAt || now.isBefore(bundleExpiresAt));
+
+  // NUEVO: Sobreescribimos el método de pago (Prioridad: Subvencionado > Lote > Normal)
+  let finalPaymentMethod = isSubsidized ? "SUBVENCIONADO" : params.paymentMethod;
+  if (!isSubsidized && finalPaymentMethod !== "SUBVENCIONADO" && hasActiveBundle) {
+    finalPaymentMethod = "LOTE_PREPAGO";
+  }
 
   // 6) Validación de límites diarios (Seguro offline)
   const aggSnap = await getOfflineSafe(aggRef);
@@ -244,8 +255,8 @@ export async function createSaleTx(params: {
     itemType: params.itemType,
     destination: params.dest,
     allowDouble: !!params.allowDouble,
-    isSubsidized, // <-- MARCAMOS LA VENTA COMO SUBVENCIONADA
-    paymentMethod: finalPaymentMethod, // <-- GUARDAMOS EL MÉTODO DE PAGO
+    isSubsidized, 
+    paymentMethod: finalPaymentMethod, // <-- Guarda LOTE_PREPAGO, MP, o EFECTIVO
     voided: false,
     voidReason: null,
     voidedBy: null,
@@ -254,6 +265,11 @@ export async function createSaleTx(params: {
   // 8) Sumar retiro si es subvencionado al contador de Gabinete
   if (isSubsidized) {
     setDoc(subRef, { totalWithdrawals: increment(1) }, { merge: true });
+  }
+
+  // --- INYECTADO: SI USA LOTE, LE RESTAMOS UNA VIANDA DE SU INVENTARIO ---
+  if (finalPaymentMethod === "LOTE_PREPAGO") {
+    setDoc(memberRef, { active_bundle: { remaining: increment(-1) } }, { merge: true });
   }
 
   // 9) Índice socio/día
@@ -275,12 +291,13 @@ export async function createSaleTx(params: {
     upd.vianda = { [params.itemType]: increment(1) };
   }
 
-  // NUEVO: Agregación Financiera Desglosada
+  // --- INYECTADO: Agregación Financiera Desglosada ---
   upd.financial = {
-    paid: increment(isSubsidized ? 0 : 1),
+    paid: increment((isSubsidized || finalPaymentMethod === "LOTE_PREPAGO") ? 0 : 1),
     subsidized: increment(isSubsidized ? 1 : 0),
     efectivo: increment(finalPaymentMethod === "EFECTIVO" ? 1 : 0),
-    mp: increment(finalPaymentMethod === "MP" ? 1 : 0)
+    mp: increment(finalPaymentMethod === "MP" ? 1 : 0),
+    lotes_usados: increment(finalPaymentMethod === "LOTE_PREPAGO" ? 1 : 0) // Rastrea el uso de abonos
   };
 
   setDoc(aggRef, upd, { merge: true });
@@ -325,12 +342,13 @@ export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
     upd.vianda = { [sale.itemType]: increment(sign) };
   }
 
-  // NUEVO: Reversión Financiera Desglosada
+  // --- INYECTADO: Reversión Financiera Desglosada ---
   upd.financial = {
-    paid: increment(sale.isSubsidized ? 0 : sign),
+    paid: increment((sale.isSubsidized || sale.paymentMethod === "LOTE_PREPAGO") ? 0 : sign),
     subsidized: increment(sale.isSubsidized ? sign : 0),
     efectivo: increment(sale.paymentMethod === "EFECTIVO" ? sign : 0),
-    mp: increment(sale.paymentMethod === "MP" ? sign : 0)
+    mp: increment(sale.paymentMethod === "MP" ? sign : 0),
+    lotes_usados: increment(sale.paymentMethod === "LOTE_PREPAGO" ? sign : 0)
   };
 
   setDoc(aggRef, upd, { merge: true });
@@ -340,6 +358,11 @@ export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
   if (sale.isSubsidized) {
     const subRef = doc(db, "subsidized_members", sale.member.id);
     setDoc(subRef, { totalWithdrawals: increment(sign) }, { merge: true });
+  }
+
+  // --- INYECTADO: SI SE ANULA UNA COMPRA CON LOTE, LE DEVOLVEMOS LA VIANDA AL SOCIO ---
+  if (sale.paymentMethod === "LOTE_PREPAGO") {
+    setDoc(doc(db, "members", sale.member.id), { active_bundle: { remaining: increment(-sign) } }, { merge: true });
   }
 }
 
@@ -444,7 +467,8 @@ export async function rebuildTodayAggFromSales() {
       VEGGIE: 0,
       CELIACO: 0,
     },
-    financial: { paid: 0, subsidized: 0, efectivo: 0, mp: 0 } // NUEVO
+    // --- INYECTADO: Agregamos lotes_usados ---
+    financial: { paid: 0, subsidized: 0, efectivo: 0, mp: 0, lotes_usados: 0 } 
   };
 
   snap.forEach((d) => {
@@ -467,9 +491,11 @@ export async function rebuildTodayAggFromSales() {
       agg.vianda[type] = (agg.vianda[type] ?? 0) + 1;
     }
 
-    // NUEVO: Reconstruir finanzas
+    // --- INYECTADO: Reconstruir finanzas con lotes ---
     if (r.isSubsidized) {
       agg.financial.subsidized += 1;
+    } else if (r.paymentMethod === "LOTE_PREPAGO") {
+      agg.financial.lotes_usados += 1;
     } else {
       agg.financial.paid += 1;
       if (r.paymentMethod === "EFECTIVO") agg.financial.efectivo += 1;
