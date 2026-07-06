@@ -6,7 +6,7 @@ admin.initializeApp();
 //const db = admin.firestore();
 
 // Tu token real de producción
-const client = new MercadoPagoConfig({ accessToken: "APP_USR-130283794802572-070109-677c7171614cc62321b425324543ec2c-732492267" });
+const client = new MercadoPagoConfig({ accessToken: "MP_ACCESS_TOKEN" });
 
 // ============================================================================
 // 1. FUNCIÓN PARA GENERAR EL LINK DE PAGO
@@ -67,7 +67,7 @@ export const mpWebhook = functions.https.onRequest(async (req, res) => {
 
     const mpResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
       headers: {
-        Authorization: `Bearer APP_USR-130283794802572-070109-677c7171614cc62321b425324543ec2c-732492267`
+        Authorization: `Bearer MP_ACCESS_TOKEN`,
       }
     });
     
