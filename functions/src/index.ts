@@ -5,8 +5,9 @@ import { MercadoPagoConfig, Preference } from "mercadopago";
 admin.initializeApp();
 //const db = admin.firestore();
 
-// Tu token real de producción
-const client = new MercadoPagoConfig({ accessToken: "MP_ACCESS_TOKEN" });
+// 1. LEEMOS LA VARIABLE DE ENTORNO CORRECTAMENTE
+const token = process.env.MP_ACCESS_TOKEN as string;
+const client = new MercadoPagoConfig({ accessToken: token });
 
 // ============================================================================
 // 1. FUNCIÓN PARA GENERAR EL LINK DE PAGO
@@ -37,12 +38,11 @@ export const generarLinkLote = functions.https.onCall(async (request) => {
         ],
         external_reference: String(dni),
         metadata: {
-          cantidad_viandas: Number(cantidadViandas), // Guardamos el número real acá
+          cantidad_viandas: Number(cantidadViandas),
           vendedor_uid: request.auth.uid,
         },
-        notification_url: "https://pl-comedor-si.vercel.app/",
-       
-        
+        // 2. VOLVEMOS A PONER LA URL DE TU BACKEND PARA EL WEBHOOK
+        notification_url: "https://mpwebhook-oa3n26zt7a-uc.a.run.app",
       },
     });
 
@@ -67,7 +67,8 @@ export const mpWebhook = functions.https.onRequest(async (req, res) => {
 
     const mpResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
       headers: {
-        Authorization: `Bearer MP_ACCESS_TOKEN`,
+        // 3. USAMOS LA VARIABLE DE ENTORNO EN EL FETCH
+        Authorization: `Bearer ${token}`,
       }
     });
     
@@ -91,7 +92,6 @@ export const mpWebhook = functions.https.onRequest(async (req, res) => {
       const memberRef = db.collection("members").doc(dni);
       const memberSnap = await memberRef.get();
 
-      // --- BLINDAJE: Si el socio no existe en la BD, lo creamos con campos base ---
       if (!memberSnap.exists) {
         await memberRef.set({
           id: dni,
@@ -101,7 +101,6 @@ export const mpWebhook = functions.https.onRequest(async (req, res) => {
         });
       }
 
-      // --- CARGAMOS LAS VIANDAS (Ahora sí o sí existe el documento) ---
       await memberRef.set({
         active_bundle: {
           remaining: Number(cantidadViandas),
@@ -110,13 +109,12 @@ export const mpWebhook = functions.https.onRequest(async (req, res) => {
         }
       }, { merge: true });
 
-      // --- TICKET DE AUDITORÍA PARA LA TABLA ---
       await db.collection("bundle_sales").doc(String(paymentId)).set({
         dni: dni,
         cantidad: Number(cantidadViandas),
         monto: montoTotal,
         fecha: admin.firestore.FieldValue.serverTimestamp(),
-        dateKey: `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}-${String(hoy.getDate()).padStart(2, '0')}`, // Inyectamos dateKey para el filtro de React
+        dateKey: `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}-${String(hoy.getDate()).padStart(2, '0')}`,
         estado: "approved"
       });
       

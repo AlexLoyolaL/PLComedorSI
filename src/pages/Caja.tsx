@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../state/AuthContext";
-import { parseMemberQR, parseOrderQR } from "../lib/parsers";
+import { parseOrderQR } from "../lib/parsers";
 import {
   createSaleTx,
   ensureDaySettings,
@@ -10,9 +10,10 @@ import {
   updateSaleTx,
 } from "../lib/sales";
 import { Card } from "../ui/Card";
-import { doc, onSnapshot, collection, getDoc, query, orderBy, setDoc } from "firebase/firestore";
+import { doc, onSnapshot, collection, query, orderBy } from "firebase/firestore";
 import { db } from "../firebase";
 import { getFunctions, httpsCallable } from "firebase/functions";
+import { resolveMemberDni } from "../lib/memberId";
 
 type Row = {
   id: string;
@@ -225,68 +226,33 @@ export default function Caja() {
 
   async function handleSocioEnter(scannedText: string) {
     if (!scannedText || scannedText.trim() === "") return;
-    
+
     try {
-      let rawId = "";
-      try {
-        rawId = parseMemberQR(scannedText).memberId;
-      } catch (e) {
-        rawId = scannedText.trim(); 
-      }
-      
-      if (!rawId || rawId.trim() === "") { 
-        rawId = scannedText.trim(); 
-      }
+      // resolveMemberDni usa la MISMA lógica que Gabinete Social para
+      // traducir el carnet escaneado al DNI canónico (vía qr_mappings).
+      // Es clave que ambas pantallas resuelvan igual, sino un socio puede
+      // quedar cargado como subvencionado bajo una clave y buscado bajo otra.
+      const finalDni = await resolveMemberDni(scannedText);
 
-      let finalDni = rawId;
-      const isPuroDni = /^\d{7,9}$/.test(rawId);
-
-      if (!isPuroDni) {
-        try {
-          const safeRawId = rawId.replace(/\//g, "-"); 
-          const mappingRef = doc(db, "qr_mappings", safeRawId);
-          const mappingSnap = await getDoc(mappingRef);
-
-          if (mappingSnap.exists()) {
-            finalDni = mappingSnap.data().dni;
-          } else {
-            const nuevoDni = window.prompt(
-              `⚠️ CÓDIGO DESCONOCIDO DETECTADO ⚠️\n\n` +
-              `Código: [ ${rawId} ]\n\n` +
-              `Ingresá SOLO LOS NÚMEROS del DNI para vincular este carnet por única vez:`
-            );
-
-            if (!nuevoDni || !/^\d{7,9}$/.test(nuevoDni.trim())) {
-              setMsg("❌ Vinculación cancelada o DNI inválido. Volvé a escanear.");
-              beep(false);
-              return; 
-            }
-
-            finalDni = nuevoDni.trim();
-            await setDoc(mappingRef, { dni: finalDni, vinculadoEn: new Date() });
-            setMsg(`✅ Carnet vinculado exitosamente al DNI: ${finalDni}`);
-          }
-        } catch (error) {
-          console.error("Error en validación de QR:", error);
-          setMsg("❌ Error consultando la base de datos. Intentá de nuevo.");
-          beep(false);
-          return; 
-        }
+      if (!finalDni) {
+        setMsg("❌ Vinculación cancelada o DNI inválido. Volvé a escanear.");
+        beep(false);
+        return;
       }
 
-      setMemberId(finalDni); 
-      
+      setMemberId(finalDni);
+
       // Ya no frenamos el proceso con un await acá. El foco pasa al pedido instantáneamente.
       setTimeout(() => {
-        pedidoRef.current?.focus(); 
+        pedidoRef.current?.focus();
         pedidoRef.current?.select?.();
       }, 50);
-      
-    } catch (e: any) { 
-      setMsg(e.message); 
-      beep(false); 
-      setIsSubsidized(false); 
-      setMemberBundleRemaining(null); 
+
+    } catch (e: any) {
+      setMsg(e.message);
+      beep(false);
+      setIsSubsidized(false);
+      setMemberBundleRemaining(null);
     }
   }
 
