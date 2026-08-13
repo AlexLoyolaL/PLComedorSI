@@ -41,7 +41,22 @@ export async function resolveMemberDni(scannedText: string): Promise<string | nu
 
   const safeRawId = rawId.replace(/\//g, "-");
   const mappingRef = doc(db, "qr_mappings", safeRawId);
-  const mappingSnap = await getDoc(mappingRef);
+
+  // Igual que en sales.ts (getOfflineSafe): si estamos sin internet y esta
+  // traducción puntual todavía no está en la caché local, Firestore tira un
+  // error ("client is offline") en vez de simplemente decir "no existe".
+  // Sin este try/catch, ese error se propagaba a Caja/Gabinete y el cajero
+  // veía un mensaje técnico en vez del cartel para tipear el DNI a mano.
+  let mappingSnap: { exists(): boolean; data(): any };
+  try {
+    mappingSnap = await getDoc(mappingRef);
+  } catch (e: any) {
+    if (e?.code === "unavailable" || e?.message?.toLowerCase().includes("offline")) {
+      mappingSnap = { exists: () => false, data: () => ({}) };
+    } else {
+      throw e;
+    }
+  }
 
   if (mappingSnap.exists()) {
     return mappingSnap.data().dni as string;

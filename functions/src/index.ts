@@ -81,6 +81,23 @@ export const mpWebhook = functions.https.onRequest(async (req, res) => {
     const paymentData = await mpResponse.json();
 
     if (paymentData.status === "approved") {
+      const db = admin.firestore();
+
+      // --- BLINDAJE DE IDEMPOTENCIA ---
+      // Mercado Pago puede reenviar la notificación de un mismo pago más de
+      // una vez (reintentos, reconciliación, notificaciones duplicadas). Sin
+      // este control, cada reenvío volvía a pisar la fecha del pago con la
+      // fecha "de hoy" y volvía a FIJAR (no sumar) el lote completo de
+      // viandas, borrando el consumo que el socio ya había hecho de ese lote.
+      // Si ya procesamos este paymentId como aprobado, no hacemos nada más.
+      const bundleRef = db.collection("bundle_sales").doc(String(paymentId));
+      const bundleSnap = await bundleRef.get();
+      if (bundleSnap.exists && (bundleSnap.data() as any)?.estado === "approved") {
+        console.log(`⏭️ Pago ${paymentId} ya estaba procesado. Notificación repetida, se ignora.`);
+        res.status(200).send("OK - Ya procesado");
+        return;
+      }
+
       const dni = String(paymentData.external_reference).trim();
       const cantidadViandas = paymentData.metadata?.cantidad_viandas || 0;
       const montoTotal = paymentData.transaction_amount;
@@ -88,7 +105,6 @@ export const mpWebhook = functions.https.onRequest(async (req, res) => {
       const hoy = new Date();
       const vencimiento = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0, 23, 59, 59);
 
-      const db = admin.firestore();
       const memberRef = db.collection("members").doc(dni);
       const memberSnap = await memberRef.get();
 
@@ -109,7 +125,7 @@ export const mpWebhook = functions.https.onRequest(async (req, res) => {
         }
       }, { merge: true });
 
-      await db.collection("bundle_sales").doc(String(paymentId)).set({
+      await bundleRef.set({
         dni: dni,
         cantidad: Number(cantidadViandas),
         monto: montoTotal,

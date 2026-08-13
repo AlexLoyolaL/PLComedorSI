@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Documentacion interna (no debe subirse a GitHub)
+/documentacion-interna/
+
+# Informes/reportes en Word (uso interno, no van a GitHub)
+*.docx
