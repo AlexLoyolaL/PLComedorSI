@@ -79,8 +79,12 @@ export default function Caja() {
   const [cantidadViandas, setCantidadViandas] = useState(20);
   const [montoPagado, setMontoPagado] = useState("");
   const [loteLoading, setLoteLoading] = useState(false);
-  const [generatedLink, setGeneratedLink] = useState(""); 
-  const [bundleSales, setBundleSales] = useState<any[]>([]); 
+  const [generatedLink, setGeneratedLink] = useState("");
+  const [bundleSales, setBundleSales] = useState<any[]>([]);
+
+  // Nombre y apellido de los socios subsidiados (Gabinete Social), para
+  // mostrarlos junto al DNI en el listado de ventas en vez de solo el número.
+  const [subsidizedNames, setSubsidizedNames] = useState<Record<string, { name: string; lastName: string }>>({});
 
   useEffect(() => {
     const goOnline = () => setIsOnline(true); 
@@ -94,6 +98,18 @@ export default function Caja() {
   }, []);
 
   useEffect(() => listenTodaySales(setRows), []);
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "subsidized_members"), (snap) => {
+      const map: Record<string, { name: string; lastName: string }> = {};
+      snap.forEach((d) => {
+        const data = d.data() as any;
+        map[d.id] = { name: data?.name ?? "", lastName: data?.lastName ?? "" };
+      });
+      setSubsidizedNames(map);
+    });
+    return () => unsub();
+  }, []);
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "adminAdds"), (snap) => {
@@ -452,7 +468,17 @@ export default function Caja() {
                     {filteredRows.map((r) => (
                       <tr key={r.id} style={{ opacity: r.voided ? 0.5 : 1 }}>
                         <td>{r.ts?.toDate ? r.ts.toDate().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ""}</td>
-                        <td>{r.member?.id}{r.isSubsidized && (<span title="Subvencionado" style={{ marginLeft: 6, fontSize: 12 }}>🎁</span>)}{r.paymentMethod === "LOTE_PREPAGO" && (<span title="Abono Lote" style={{ marginLeft: 6, fontSize: 12 }}>🎟️</span>)}</td>
+                        <td>
+                          {r.isSubsidized && subsidizedNames[r.member?.id]?.name ? (
+                            <>
+                              {subsidizedNames[r.member.id].lastName}, {subsidizedNames[r.member.id].name}
+                              <div style={{ fontSize: 11, color: "var(--muted)" }}>{r.member?.id}</div>
+                            </>
+                          ) : (
+                            r.member?.id
+                          )}
+                          {r.isSubsidized && (<span title="Subvencionado" style={{ marginLeft: 6, fontSize: 12 }}>🎁</span>)}{r.paymentMethod === "LOTE_PREPAGO" && (<span title="Abono Lote" style={{ marginLeft: 6, fontSize: 12 }}>🎟️</span>)}
+                        </td>
                         <td>{r.itemType}{r.paymentMethod === "EFECTIVO" && (<span title="Efectivo" style={{ marginLeft: 6, fontSize: 12 }}>💵</span>)}{r.paymentMethod === "MP" && (<span title="Mercado Pago" style={{ marginLeft: 6, fontSize: 12 }}>📱</span>)}</td>
                         <td>{r.destination?.mode}</td>
                         <td>{r.destination?.table ?? "-"}</td>

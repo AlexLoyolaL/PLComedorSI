@@ -9,8 +9,9 @@ import { useState, useEffect } from "react";
 import Gabinete from "./pages/Gabinete";
 import AdminRolesPage from "./pages/AdminRoles";
 import AuditoriaRendicionPage from "./pages/AuditoriaRendicion";
+import ListadoQRPage from "./pages/ListadoQR";
 
-type Tab = "caja" | "cocina" | "super" | "admin" | "rendicion" | "gabinete" | "adminRoles" | "auditoria";
+type Tab = "caja" | "cocina" | "super" | "admin" | "rendicion" | "gabinete" | "adminRoles" | "auditoria" | "listadoQR";
 
 export default function App() {
   const { user, role, loading, logout } = useAuth();
@@ -151,6 +152,13 @@ export default function App() {
           </button>
         )}
 
+        {/* NUEVO: Listado QR — exclusivo para ROOT, para no gastar lecturas de más */}
+        {isRoot && (
+          <button className={`tab ${tab === "listadoQR" ? "active" : ""}`} onClick={() => setTab("listadoQR")}>
+            📋 Listado QR
+          </button>
+        )}
+
         <div className="fill" />
         <span className="badge">{user.email}</span>
         <button className="button ghost" onClick={logout}>
@@ -167,6 +175,7 @@ export default function App() {
         {tab === "rendicion" && canSeeRendicion && <RendicionPage />}
         {tab === "adminRoles" && isRoot && <AdminRolesPage />}
         {tab === "auditoria" && (isRoot || isAdmin || isVisor) && <AuditoriaRendicionPage />}
+        {tab === "listadoQR" && isRoot && <ListadoQRPage />}
       </div>
     </div>
   );

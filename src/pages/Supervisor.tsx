@@ -1,6 +1,6 @@
 // src/pages/Supervisor.tsx
 import { useEffect, useState } from "react";
-import { collection, getDocs, orderBy, query, where, limit, startAfter, documentId } from "firebase/firestore";
+import { collection, getDocs, orderBy, query, where, limit, startAfter, documentId, onSnapshot } from "firebase/firestore";
 import { db } from "../firebase";
 import { Card } from "../ui/Card";
 import {
@@ -22,6 +22,7 @@ type Row = {
   manual?: boolean;
   manualConcept?: string;
   manualNote?: string;
+  isSubsidized?: boolean;
 };
 
 function addDays(date: Date, delta: number) {
@@ -54,6 +55,22 @@ export default function Supervisor() {
 
   // Checkbox de Auditoría
   const [showSubsidized, setShowSubsidized] = useState(false);
+
+  // Nombre y apellido de los socios subsidiados (Gabinete Social), para
+  // mostrarlos junto al DNI en la tabla y en los exports.
+  const [subsidizedNames, setSubsidizedNames] = useState<Record<string, { name: string; lastName: string }>>({});
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "subsidized_members"), (snap) => {
+      const map: Record<string, { name: string; lastName: string }> = {};
+      snap.forEach((d) => {
+        const data = d.data() as any;
+        map[d.id] = { name: data?.name ?? "", lastName: data?.lastName ?? "" };
+      });
+      setSubsidizedNames(map);
+    });
+    return () => unsub();
+  }, []);
 
   // Estados de carga
   const [loading, setLoading] = useState(false);
@@ -218,19 +235,24 @@ export default function Supervisor() {
     setCalculatingExport(true);
     try {
       const allRows = await fetchAllForExport();
-      const header = ["fecha", "hora", "vendedor", "socio", "tipo", "destino", "mesa", "observaciones"];
+      const header = ["fecha", "hora", "vendedor", "socio", "apellido", "nombre", "tipo", "destino", "mesa", "observaciones"];
       const lines = allRows
         .filter((r) => !r.voided)
-        .map((r) => [
-          r.dateKey,
-          r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : "",
-          r.seller?.email ?? "",
-          r.member?.id ?? "",
-          r.itemType,
-          r.destination?.mode ?? "",
-          r.destination?.table ?? "",
-          r.manualNote ?? "",
-        ]);
+        .map((r) => {
+          const info = r.isSubsidized ? subsidizedNames[r.member?.id ?? ""] : undefined;
+          return [
+            r.dateKey,
+            r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : "",
+            r.seller?.email ?? "",
+            r.member?.id ?? "",
+            info?.lastName ?? "",
+            info?.name ?? "",
+            r.itemType,
+            r.destination?.mode ?? "",
+            r.destination?.table ?? "",
+            r.manualNote ?? "",
+          ];
+        });
 
       const csv = [header, ...lines].map((a) => a.join(",")).join("\n");
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -249,19 +271,24 @@ export default function Supervisor() {
       const allRows = await fetchAllForExport();
       const data = allRows
         .filter((r) => !r.voided)
-        .map((r) => ({
-          Fecha: r.dateKey ?? "",
-          Hora: r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : "",
-          Vendedor: r.seller?.email ?? "",
-          Socio: r.member?.id ?? "",
-          Tipo: r.itemType ?? "",
-          Destino: r.destination?.mode ?? "",
-          Mesa: r.destination?.table ?? "",
-          Observaciones: r.manualNote ?? "",
-        }));
+        .map((r) => {
+          const info = r.isSubsidized ? subsidizedNames[r.member?.id ?? ""] : undefined;
+          return {
+            Fecha: r.dateKey ?? "",
+            Hora: r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : "",
+            Vendedor: r.seller?.email ?? "",
+            Socio: r.member?.id ?? "",
+            Apellido: info?.lastName ?? "",
+            Nombre: info?.name ?? "",
+            Tipo: r.itemType ?? "",
+            Destino: r.destination?.mode ?? "",
+            Mesa: r.destination?.table ?? "",
+            Observaciones: r.manualNote ?? "",
+          };
+        });
 
       const wsVentas = XLSX.utils.json_to_sheet(data);
-      wsVentas["!cols"] = [{ wch: 12 }, { wch: 10 }, { wch: 25 }, { wch: 20 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 30 }];
+      wsVentas["!cols"] = [{ wch: 12 }, { wch: 10 }, { wch: 25 }, { wch: 20 }, { wch: 18 }, { wch: 18 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 30 }];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, wsVentas, "Ventas");
 
@@ -453,7 +480,16 @@ export default function Supervisor() {
                   <td>{r.dateKey}</td>
                   <td>{r.ts?.toDate ? r.ts.toDate().toLocaleTimeString() : ""}</td>
                   <td>{r.seller?.email ?? ""}</td>
-                  <td>{r.member?.id ?? ""}</td>
+                  <td>
+                    {r.isSubsidized && subsidizedNames[r.member?.id ?? ""]?.name ? (
+                      <>
+                        {subsidizedNames[r.member!.id!].lastName}, {subsidizedNames[r.member!.id!].name}
+                        <div style={{ fontSize: 11, color: "var(--muted)" }}>{r.member?.id}</div>
+                      </>
+                    ) : (
+                      r.member?.id ?? ""
+                    )}
+                  </td>
                   <td>{r.itemType}</td>
                   <td>{r.destination?.mode ?? ""}</td>
                   <td>{r.destination?.table ?? "-"}</td>
