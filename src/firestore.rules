@@ -1,32 +1,127 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isSignedIn() { return request.auth != null; }
-
-    match /roles/{uid} {
-      allow read: if isSignedIn();
-      allow write: if false;
+    // ========= FUNCIONES DE ROL OPTIMIZADAS (Short-Circuit) =========
+    function signedIn() {
+      return request.auth != null;
+    }
+    function getRoles() {
+      return get(/databases/$(database)/documents/app/roles).data;
+    }
+    function isRoot() {
+      return signedIn() && getRoles().root[request.auth.uid] == true;
+    }
+    // Al poner el rol superior PRIMERO, evitamos que Firebase busque en mapas donde el usuario no está
+    function isAdmin() {
+      return signedIn() && (isRoot() || getRoles().administradores[request.auth.uid] == true);
+    }
+    function isAdministrativo() {
+      return signedIn() && (isAdmin() || getRoles().administrativos[request.auth.uid] == true);
+    }
+    function isCocina() {
+      return signedIn() && (isAdmin() || getRoles().cocina[request.auth.uid] == true);
+    }
+    function isVisor() {
+      return signedIn() && (
+        isAdmin() ||
+        getRoles().directores[request.auth.uid] == true ||
+        getRoles().gabinete[request.auth.uid] == true
+      );
+    }
+    function isGabinete() {
+      return signedIn() && (isAdmin() || getRoles().gabinete[request.auth.uid] == true);
     }
 
-    match /settings_day/{day} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn(); // en prod: limitar a Supervisor
+    // ========= COLECCIONES =========
+
+    // --- ETL de Usuarios (Perfil e Email) ---
+    match /users/{userId} {
+      // Un usuario puede crear/actualizar su propio perfil silenciosamente al loguearse.
+      // El ROOT puede leer todos los perfiles para buscar por email y asignar accesos.
+      allow read, write: if signedIn() && (request.auth.uid == userId || isRoot());
     }
 
+    match /app/roles {
+      allow read: if signedIn();
+      allow write: if isRoot();
+    }
 
     match /sales/{id} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn(); // en producción: limitar a Administrativo
+      allow read: if isAdministrativo() || isCocina() || isVisor();
+      allow create, update: if isAdministrativo();
       allow delete: if false;
     }
 
     match /dayAgg/{day} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn(); // en producción: limitar a Administrativo
+      allow read: if isCocina() || isAdministrativo() || isVisor();
+      allow write: if isAdministrativo();
     }
 
-    match /membersDayIndex/{key} {
-      allow read, write: if isSignedIn(); // en producción: limitar write a Administrativo
+    match /settings_day/{day} {
+      allow read: if isAdministrativo() || isVisor();
+      allow write: if isAdmin();
+    }
+
+    match /membersDayIndex/{id} {
+      allow read: if isAdministrativo() || isVisor();
+      allow write: if isAdministrativo();
+    }
+
+    match /adminAdds/{id} {
+      allow read: if isAdministrativo() || isCocina() || isVisor();
+      allow write: if isAdmin();
+    }
+
+    // --- EL PADRÓN DEL GABINETE SOCIAL ---
+    match /subsidized_members/{id} {
+      allow read: if isAdministrativo() || isVisor();
+
+      // Root y Gabinete pueden crear (dar altas) y borrar (quitar beneficio)
+      allow create, delete: if isRoot() || isGabinete();
+
+      // Administrativos NECESITAN poder actualizar (update) para sumar el +1 a las viandas retiradas
+      allow update: if isAdministrativo() || isRoot() || isGabinete();
+    }
+
+    // --- AUDITORÍA DE RENDICIONES (PDFs y Balances) ---
+    match /rendiciones_audit/{day} {
+      // Root, Admins, Visores y Administrativos pueden ver el historial
+      allow read: if isAdministrativo() || isVisor();
+      // Administrativos (los que cierran la caja) y superiores pueden guardarla
+      allow write: if isAdministrativo();
+    }
+
+    // --- Mapeo de carnets (QR -> DNI) ---
+    // Antes: cualquier usuario logueado, sin importar el rol, podía leer y
+    // escribir acá. Se restringe a quienes realmente vinculan carnets:
+    // cajeros (al resolver un carnet viejo en una venta) y Gabinete Social
+    // (al dar de alta o reparar carnets viejos).
+    match /qr_mappings/{document} {
+      allow read: if isAdministrativo() || isVisor();
+      allow write: if isAdministrativo() || isGabinete();
+    }
+
+    // --- Auditoría de venta de lotes (Mercado Pago) ---
+    // Antes: cualquier usuario logueado podía escribir acá directamente, lo
+    // que permitía fabricar un "pago aprobado" falso y autoacreditarse
+    // viandas sin pagar. La única escritura legítima es la del Cloud
+    // Function mpWebhook, que usa el Admin SDK y no depende de estas reglas.
+    match /bundle_sales/{document} {
+      allow read: if isAdministrativo() || isVisor();
+      allow write: if false;
+    }
+
+    match /members/{id} {
+      // Los cajeros y visores necesitan ver cuántas viandas le quedan al socio
+      allow read: if isAdministrativo() || isVisor();
+
+      // Los cajeros necesitan permiso de escritura para hacer el "increment(-1)" al vender
+      allow write: if isAdministrativo();
+    }
+
+    // Cerrar cualquier otra colección por defecto
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

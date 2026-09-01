@@ -213,12 +213,12 @@ const RendicionPage: React.FC = () => {
   const [hasSaved, setHasSaved] = useState(false); 
   
   const [sharedState, setSharedState] = useState<RendicionState>({
-    valorMenu: 2500,
-    valorVeggie: 2500,
-    valorCeliaco: 2500,
-    valorAcompMenu: 2500,
-    valorAcompVeggie: 2500,
-    valorMp: 2500,
+    valorMenu: 3000,
+    valorVeggie: 3000,
+    valorCeliaco: 3000,
+    valorAcompMenu: 3000,
+    valorAcompVeggie: 3000,
+    valorMp: 3000,
     manual: {
       acompMenuComensales: 0,
       acompVeggieComensales: 0,
