@@ -75,9 +75,13 @@ export default function Caja() {
   const [filterTable, setFilterTable] = useState("");
   const [filterSubsidized, setFilterSubsidized] = useState(false);
 
+  // Precio por vianda del lote mensual. Actualizalo acá cuando cambie el
+  // valor del menú para que el total a cobrar del lote se siga calculando solo.
+  const PRECIO_VIANDA_LOTE = 3000;
+
   const [loteDni, setLoteDni] = useState("");
   const [cantidadViandas, setCantidadViandas] = useState(20);
-  const [montoPagado, setMontoPagado] = useState("");
+  const [montoPagado, setMontoPagado] = useState(String(20 * PRECIO_VIANDA_LOTE));
   const [loteLoading, setLoteLoading] = useState(false);
   const [generatedLink, setGeneratedLink] = useState("");
   const [bundleSales, setBundleSales] = useState<any[]>([]);
@@ -98,6 +102,12 @@ export default function Caja() {
   }, []);
 
   useEffect(() => listenTodaySales(setRows), []);
+
+  // Recalcula el total a cobrar del lote cada vez que cambia la cantidad de
+  // viandas elegida, en base al precio vigente por vianda.
+  useEffect(() => {
+    setMontoPagado(String(cantidadViandas * PRECIO_VIANDA_LOTE));
+  }, [cantidadViandas]);
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "subsidized_members"), (snap) => {
@@ -515,6 +525,9 @@ export default function Caja() {
                 <div>
                   <label style={{ display: "block", fontWeight: "bold", marginBottom: 6 }}>Total a Cobrar ($):</label>
                   <input type="number" className="input" required placeholder="Ej: 40000" value={montoPagado} onChange={(e) => setMontoPagado(e.target.value)} />
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                    Se calcula solo (${PRECIO_VIANDA_LOTE.toLocaleString("es-AR")} x vianda). Podés editarlo si hace falta un valor distinto.
+                  </div>
                 </div>
               </div>
 
