@@ -10,7 +10,7 @@ import {
   updateSaleTx,
 } from "../lib/sales";
 import { Card } from "../ui/Card";
-import { doc, onSnapshot, collection, query, orderBy } from "firebase/firestore";
+import { doc, onSnapshot, collection, query, orderBy, where } from "firebase/firestore";
 import { db } from "../firebase";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { resolveMemberDni } from "../lib/memberId";
@@ -74,6 +74,11 @@ export default function Caja() {
   const [searchSocio, setSearchSocio] = useState("");
   const [filterTable, setFilterTable] = useState("");
   const [filterSubsidized, setFilterSubsidized] = useState(false);
+  const [filterLote, setFilterLote] = useState(false);
+
+  // Lotes (abonos de Mercado Pago) actualmente activos, con viandas
+  // disponibles y sin vencer.
+  const [activeLotes, setActiveLotes] = useState<{ dni: string; remaining: number; expiresAt: Date | null }[]>([]);
 
   // Precio por vianda del lote mensual. Actualizalo acá cuando cambie el
   // valor del menú para que el total a cobrar del lote se siga calculando solo.
@@ -125,6 +130,26 @@ export default function Caja() {
     const unsub = onSnapshot(collection(db, "adminAdds"), (snap) => {
       const today = todayKey();
       setManualAdds(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })).filter((r) => r.dateKey === today));
+    });
+    return () => unsub();
+  }, []);
+
+  // Lotes activos: socios con abono por Mercado Pago que todavía tienen
+  // viandas disponibles y no vencieron.
+  useEffect(() => {
+    const qLotes = query(collection(db, "members"), where("active_bundle.remaining", ">", 0));
+    const unsub = onSnapshot(qLotes, (snap) => {
+      const now = new Date();
+      const list: { dni: string; remaining: number; expiresAt: Date | null }[] = [];
+      snap.forEach((d) => {
+        const bundle = (d.data() as any)?.active_bundle;
+        if (!bundle) return;
+        const expiresAt = bundle.expiresAt?.toDate ? bundle.expiresAt.toDate() : null;
+        if (expiresAt && now > expiresAt) return; // vencido: no cuenta como activo
+        list.push({ dni: d.id, remaining: bundle.remaining, expiresAt });
+      });
+      list.sort((a, b) => a.remaining - b.remaining);
+      setActiveLotes(list);
     });
     return () => unsub();
   }, []);
@@ -186,11 +211,12 @@ export default function Caja() {
   const filteredRows = useMemo(() => {
     let base = rows.filter((r) => !r.manual);
     if (filterSubsidized) base = base.filter((r) => r.isSubsidized);
+    if (filterLote) base = base.filter((r) => r.paymentMethod === "LOTE_PREPAGO");
     if (filterTable) base = base.filter((r) => r.destination?.table === filterTable);
     const q = searchSocio.trim().toLowerCase();
     if (q) base = base.filter((r) => (r.member?.id ?? "").toLowerCase().includes(q));
     return base;
-  }, [rows, searchSocio, filterSubsidized, filterTable]);
+  }, [rows, searchSocio, filterSubsidized, filterLote, filterTable]);
 
   const viandaCounts = useMemo(() => rows.reduce((acc, r) => {
     if (!r.voided && !r.manual && (r.itemType === "MENU" || r.itemType === "VEGGIE" || r.itemType === "CELIACO")) {
@@ -469,6 +495,7 @@ export default function Caja() {
                 <input type="text" placeholder="Buscar socio..." value={searchSocio} onChange={(e) => setSearchSocio(e.target.value)} style={{ flex: "1 1 150px", padding: 6, fontSize: 14, boxSizing: "border-box" }} />
                 <select value={filterTable} onChange={(e) => setFilterTable(e.target.value)} style={{ padding: 6, fontSize: 14, borderRadius: 4 }}><option value="">Todas las mesas</option>{Array.from({ length: 34 }, (_, i) => { const val = `MESA ${String(i + 1).padStart(2, "0")}`; return <option key={val} value={val}>{val}</option>; })}</select>
                 <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer", fontWeight: 600 }}><input type="checkbox" checked={filterSubsidized} onChange={(e) => setFilterSubsidized(e.target.checked)} /> Solo Subvencionados 🎁</label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer", fontWeight: 600 }}><input type="checkbox" checked={filterLote} onChange={(e) => setFilterLote(e.target.checked)} /> Solo Lotes 🎟️</label>
               </div>
               <p style={{ marginTop: 0, color: "var(--muted)" }}>Listado en vivo. Podés editar rápido o anular.</p>
               <div style={{ maxHeight: "70vh", overflow: "auto" }}>
@@ -583,6 +610,41 @@ export default function Caja() {
               * Los pagos realizados por las familias aparecen automáticamente aquí en menos de 30 segundos tras su aprobación en Mercado Pago.
             </div>
           </Card>
+
+          <div style={{ gridColumn: "1 / -1" }}>
+            <Card title={`Lotes Activos (${activeLotes.length})`}>
+              {activeLotes.length === 0 ? (
+                <p style={{ color: "var(--muted)", fontStyle: "italic" }}>No hay lotes activos con viandas disponibles.</p>
+              ) : (
+                <table className="table" style={{ fontSize: 14 }}>
+                  <thead>
+                    <tr>
+                      <th>DNI Socio</th>
+                      <th>Viandas Restantes</th>
+                      <th>Vence</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {activeLotes.map((l) => (
+                      <tr key={l.dni} style={{ background: l.remaining <= 3 ? "rgba(239, 68, 68, 0.08)" : undefined }}>
+                        <td style={{ fontWeight: "bold" }}>
+                          {subsidizedNames[l.dni]?.name ? `${subsidizedNames[l.dni].lastName}, ${subsidizedNames[l.dni].name} (${l.dni})` : l.dni}
+                        </td>
+                        <td>
+                          {l.remaining}
+                          {l.remaining <= 3 && (<span title="Por agotarse" style={{ marginLeft: 6, fontSize: 12 }}>⚠️</span>)}
+                        </td>
+                        <td>{l.expiresAt ? l.expiresAt.toLocaleDateString("es-AR") : "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              <div style={{ marginTop: 15, fontSize: 12, color: "var(--muted)" }}>
+                * Lista en vivo. Solo se muestran socios con viandas disponibles y lote sin vencer.
+              </div>
+            </Card>
+          </div>
 
         </div>
       )}
