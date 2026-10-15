@@ -6,6 +6,14 @@ import { Card } from "../ui/Card";
 
 type ItemType = "MENU" | "VEGGIE" | "CELIACO";
 
+type SaleRow = {
+  id: string;
+  itemType?: ItemType;
+  voided?: boolean;
+  manual?: boolean;
+  seller?: { uid?: string; email?: string; name?: string };
+};
+
 type Agg = {
   comedor: { MENU: number; VEGGIE: number; CELIACO: number; byTable: Record<string, number> };
   vianda: { MENU: number; VEGGIE: number; CELIACO: number };
@@ -22,6 +30,7 @@ function emptyAgg(): Agg {
 export default function Cocina() {
   const [aggDoc, setAggDoc] = useState<Agg | null>(null);
   const [calc, setCalc] = useState<Agg>(emptyAgg());
+  const [salesRows, setSalesRows] = useState<SaleRow[]>([]);
 
   const [adminAgg, setAdminAgg] = useState<{ MENU: number; VEGGIE: number; CELIACO: number }>({
   MENU: 0,
@@ -44,6 +53,7 @@ export default function Cocina() {
     const q = query(collection(db, "sales"), where("dateKey", "==", key));
     const unsub = onSnapshot(q, (snap) => {
       const tmp = emptyAgg();
+      setSalesRows(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
       snap.forEach((d) => {
         const r: any = d.data();
         if (r.voided) return;
@@ -120,6 +130,40 @@ export default function Cocina() {
     });
   }, [comedor.byTable]);
 
+  const ventasPorVendedor = useMemo(() => {
+    const sellers = new Map<string, {
+      key: string;
+      label: string;
+      MENU: number;
+      VEGGIE: number;
+      CELIACO: number;
+      total: number;
+    }>();
+
+    salesRows.forEach((sale) => {
+      if (sale.voided || sale.manual || !sale.itemType) return;
+
+      const key = sale.seller?.uid || sale.seller?.email || "sin-identificar";
+      const label = sale.seller?.name?.trim()
+        || sale.seller?.email?.split("@")[0]
+        || "Sin identificar";
+      const current = sellers.get(key) ?? {
+        key,
+        label,
+        MENU: 0,
+        VEGGIE: 0,
+        CELIACO: 0,
+        total: 0,
+      };
+
+      current[sale.itemType] += 1;
+      current.total += 1;
+      sellers.set(key, current);
+    });
+
+    return Array.from(sellers.values()).sort((a, b) => b.total - a.total || a.label.localeCompare(b.label));
+  }, [salesRows]);
+
   // separar en normales y anexo
   const normales = mesasOrdenadas.filter(([k]) => {
     const n = parseInt(String(k).replace(/[^\d]/g, ""), 10);
@@ -189,6 +233,39 @@ export default function Cocina() {
               <h4 style={{ marginTop: "1em" }}>Anexo (límite 8)</h4>
               {renderMesas(anexo, 8)}
             </>
+          )}
+        </Card>
+      </div>
+
+      <div style={{ gridColumn: "1 / -1", width: "100%" }}>
+        <Card title="Ventas por vendedor">
+          {ventasPorVendedor.length === 0 ? (
+            <div style={{ color: "var(--muted)" }}>Todavía no hay ventas registradas hoy.</div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Vendedor</th>
+                    <th>Menú</th>
+                    <th>Veggie</th>
+                    <th>Celíaco</th>
+                    <th>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ventasPorVendedor.map((seller) => (
+                    <tr key={seller.key}>
+                      <td style={{ fontWeight: 700 }}>{seller.label}</td>
+                      <td>{seller.MENU}</td>
+                      <td>{seller.VEGGIE}</td>
+                      <td>{seller.CELIACO}</td>
+                      <td style={{ fontWeight: 700 }}>{seller.total}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </Card>
       </div>

@@ -9,6 +9,7 @@ import {
   voidSaleTx,
   updateSaleTx,
 } from "../lib/sales";
+import type { PaymentMethod } from "../lib/sales";
 import { Card } from "../ui/Card";
 import { doc, onSnapshot, collection, query, orderBy, where } from "firebase/firestore";
 import { db } from "../firebase";
@@ -26,12 +27,26 @@ type Row = {
   voided: boolean;
   manual?: boolean;
   isSubsidized?: boolean;
-  paymentMethod?: "EFECTIVO" | "MP" | "SUBVENCIONADO" | "LOTE_PREPAGO"; 
+  paymentMethod?: PaymentMethod;
 };
 
 type OrderData = {
   itemType: "MENU" | "VEGGIE" | "CELIACO";
   dest: { mode: "COMEDOR" | "VIANDA"; table: string | null };
+};
+
+type SaleEditForm = {
+  itemType: Row["itemType"];
+  mode: Row["destination"]["mode"];
+  table: string;
+  paymentMethod: PaymentMethod;
+};
+
+const PAYMENT_LABELS: Record<PaymentMethod, string> = {
+  EFECTIVO: "Efectivo",
+  MP: "Mercado Pago",
+  SUBVENCIONADO: "Subvencionado",
+  LOTE_PREPAGO: "Lote prepago",
 };
 
 function hasEnter(s: string) {
@@ -68,6 +83,10 @@ export default function Caja() {
   const ready = useMemo(() => !!memberId && !!order, [memberId, order]);
 
   const [rows, setRows] = useState<Row[]>([]);
+  const [editingSale, setEditingSale] = useState<Row | null>(null);
+  const [editForm, setEditForm] = useState<SaleEditForm | null>(null);
+  const [editError, setEditError] = useState("");
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [manualAdds, setManualAdds] = useState<any[]>([]);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
 
@@ -377,25 +396,51 @@ export default function Caja() {
 
   async function anular(id: string) { try { await voidSaleTx(id, true, "Anulada"); } catch (e: any) { setMsg(e.message || String(e)); } }
   
-  async function editar(r: Row) {
-    const nuevoTipo = prompt("Tipo (MENU/VEGGIE/CELIACO):", r.itemType)?.toUpperCase(); 
-    if (!nuevoTipo || (nuevoTipo !== "MENU" && nuevoTipo !== "VEGGIE" && nuevoTipo !== "CELIACO")) return;
-    
-    const modo = prompt("Destino (COMEDOR/VIANDA):", r.destination.mode)?.toUpperCase(); 
-    if (!modo || (modo !== "COMEDOR" && modo !== "VIANDA")) return;
-    
-    let mesa: string | null = r.destination.table; 
-    if (modo === "COMEDOR") { 
-      mesa = prompt("Mesa:", r.destination.table ?? "")?.toUpperCase() || ""; 
-      if (!mesa) return; 
-    } else { 
-      mesa = null; 
+  function editar(r: Row) {
+    setEditingSale(r);
+    setEditForm({
+      itemType: r.itemType,
+      mode: r.destination.mode,
+      table: r.destination.table ?? "MESA 01",
+      paymentMethod: r.isSubsidized ? "SUBVENCIONADO" : (r.paymentMethod ?? "EFECTIVO"),
+    });
+    setEditError("");
+  }
+
+  function cerrarEdicion() {
+    if (isSavingEdit) return;
+    setEditingSale(null);
+    setEditForm(null);
+    setEditError("");
+  }
+
+  async function guardarEdicion(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingSale || !editForm) return;
+    if (editForm.mode === "COMEDOR" && !editForm.table) {
+      setEditError("Seleccioná una mesa.");
+      return;
     }
-    
-    try { 
-      await updateSaleTx({ saleId: r.id, newItemType: nuevoTipo as any, newDest: { mode: modo as any, table: mesa } }); 
-    } catch (e: any) { 
-      alert(e.message || String(e)); 
+
+    setIsSavingEdit(true);
+    setEditError("");
+    try {
+      await updateSaleTx({
+        saleId: editingSale.id,
+        newItemType: editForm.itemType,
+        newDest: {
+          mode: editForm.mode,
+          table: editForm.mode === "COMEDOR" ? editForm.table : null,
+        },
+        newPaymentMethod: editForm.paymentMethod,
+      });
+      setEditingSale(null);
+      setEditForm(null);
+      setEditError("");
+    } catch (e: any) {
+      setEditError(e.message || String(e));
+    } finally {
+      setIsSavingEdit(false);
     }
   }
 
@@ -500,7 +545,7 @@ export default function Caja() {
               <p style={{ marginTop: 0, color: "var(--muted)" }}>Listado en vivo. Podés editar rápido o anular.</p>
               <div style={{ maxHeight: "70vh", overflow: "auto" }}>
                 <table className="table">
-                  <thead><tr><th>Hora</th><th>Socio</th><th>Tipo</th><th>Destino</th><th>Mesa</th><th>Vendedor</th><th></th></tr></thead>
+                  <thead><tr><th>Hora</th><th>Socio</th><th>Tipo</th><th>Pago</th><th>Destino</th><th>Mesa</th><th>Vendedor</th><th></th></tr></thead>
                   <tbody>
                     {filteredRows.map((r) => (
                       <tr key={r.id} style={{ opacity: r.voided ? 0.5 : 1 }}>
@@ -516,7 +561,8 @@ export default function Caja() {
                           )}
                           {r.isSubsidized && (<span title="Subvencionado" style={{ marginLeft: 6, fontSize: 12 }}>🎁</span>)}{r.paymentMethod === "LOTE_PREPAGO" && (<span title="Abono Lote" style={{ marginLeft: 6, fontSize: 12 }}>🎟️</span>)}
                         </td>
-                        <td>{r.itemType}{r.paymentMethod === "EFECTIVO" && (<span title="Efectivo" style={{ marginLeft: 6, fontSize: 12 }}>💵</span>)}{r.paymentMethod === "MP" && (<span title="Mercado Pago" style={{ marginLeft: 6, fontSize: 12 }}>📱</span>)}</td>
+                        <td>{r.itemType}</td>
+                        <td>{PAYMENT_LABELS[r.isSubsidized ? "SUBVENCIONADO" : (r.paymentMethod ?? "EFECTIVO")]}</td>
                         <td>{r.destination?.mode}</td>
                         <td>{r.destination?.table ?? "-"}</td>
                         <td>{r.seller?.email?.split('@')[0]}</td>
@@ -646,6 +692,97 @@ export default function Caja() {
             </Card>
           </div>
 
+        </div>
+      )}
+
+      {editingSale && editForm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="editar-venta-title"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 100,
+            display: "grid",
+            placeItems: "center",
+            padding: 20,
+            background: "rgba(3, 8, 20, 0.78)",
+          }}
+        >
+          <form
+            onSubmit={guardarEdicion}
+            className="panel"
+            style={{ width: "min(560px, 100%)", display: "grid", gap: 16, boxShadow: "0 24px 80px rgba(0,0,0,.5)" }}
+          >
+            <div>
+              <h2 id="editar-venta-title" style={{ margin: 0 }}>Editar venta</h2>
+              <div style={{ color: "var(--muted)", marginTop: 4 }}>
+                Socio {editingSale.member?.id} · Revisá los datos antes de guardar.
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
+              <label style={{ display: "grid", gap: 6 }}>
+                <span style={{ fontWeight: 700 }}>Tipo de comida</span>
+                <select className="input" value={editForm.itemType} onChange={(e) => setEditForm({ ...editForm, itemType: e.target.value as Row["itemType"] })}>
+                  <option value="MENU">Menú</option>
+                  <option value="VEGGIE">Veggie</option>
+                  <option value="CELIACO">Celíaco</option>
+                </select>
+              </label>
+
+              <label style={{ display: "grid", gap: 6 }}>
+                <span style={{ fontWeight: 700 }}>Medio de pago</span>
+                <select className="input" value={editForm.paymentMethod} onChange={(e) => setEditForm({ ...editForm, paymentMethod: e.target.value as PaymentMethod })}>
+                  <option value="EFECTIVO">Efectivo</option>
+                  <option value="MP">Mercado Pago</option>
+                  <option value="SUBVENCIONADO">Subvencionado</option>
+                  <option value="LOTE_PREPAGO">Lote prepago</option>
+                </select>
+              </label>
+
+              <label style={{ display: "grid", gap: 6 }}>
+                <span style={{ fontWeight: 700 }}>Destino</span>
+                <select className="input" value={editForm.mode} onChange={(e) => setEditForm({ ...editForm, mode: e.target.value as Row["destination"]["mode"] })}>
+                  <option value="COMEDOR">Comedor</option>
+                  <option value="VIANDA">Vianda</option>
+                </select>
+              </label>
+
+              <label style={{ display: "grid", gap: 6, opacity: editForm.mode === "COMEDOR" ? 1 : 0.55 }}>
+                <span style={{ fontWeight: 700 }}>Mesa</span>
+                <select
+                  className="input"
+                  value={editForm.table}
+                  disabled={editForm.mode !== "COMEDOR"}
+                  onChange={(e) => setEditForm({ ...editForm, table: e.target.value })}
+                >
+                  {Array.from({ length: 34 }, (_, i) => {
+                    const table = `MESA ${String(i + 1).padStart(2, "0")}`;
+                    return <option key={table} value={table}>{table}</option>;
+                  })}
+                </select>
+              </label>
+            </div>
+
+            <div style={{ padding: 10, borderRadius: 10, background: "rgba(79,140,255,.10)", color: "var(--muted)", fontSize: 13 }}>
+              Si cambiás a lote o subvencionado, el sistema valida que el socio tenga ese beneficio activo y ajusta los contadores automáticamente.
+            </div>
+
+            {editError && (
+              <div style={{ color: "var(--danger)", padding: 10, border: "1px solid var(--danger)", borderRadius: 10 }}>
+                {editError}
+              </div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" className="button outline" onClick={cerrarEdicion} disabled={isSavingEdit}>Cancelar</button>
+              <button type="submit" className="button" disabled={isSavingEdit}>
+                {isSavingEdit ? "Guardando..." : "Guardar cambios"}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>

@@ -5,7 +5,6 @@ import { db, storage } from "../firebase";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
-import { useAuth } from "../state/AuthContext";
 
 type Row = any;
 
@@ -28,12 +27,14 @@ type BlockProps = {
   blockId?: string;
   fechaTexto: string;
   diaSemana: string;
-  totalMenuCaja: number;
-  totalVeggieCaja: number;
-  totalCeliacoCaja: number;
+  totalMenuEfectivo: number;
+  totalVeggieEfectivo: number;
+  totalCeliacoEfectivo: number;
+  totalComensales: number;
   totalMpCaja: number; 
   totalLotesConsumidos: number; // Platos consumidos hoy con Abono
   bundleSales: any[];           // Abonos/Lotes vendidos hoy
+  responsablesVenta: string[];
   state: RendicionState;
   updateState: (newState: Partial<RendicionState>) => void;
   updateManual: (field: keyof RendicionState["manual"], value: number) => void;
@@ -43,22 +44,21 @@ const RendicionBlock: React.FC<BlockProps> = ({
   blockId,
   fechaTexto,
   diaSemana,
-  totalMenuCaja,
-  totalVeggieCaja,
-  totalCeliacoCaja,
+  totalMenuEfectivo,
+  totalVeggieEfectivo,
+  totalCeliacoEfectivo,
+  totalComensales,
   totalMpCaja,
   totalLotesConsumidos,
   bundleSales,
+  responsablesVenta,
   state,
   updateState,
   updateManual
 }) => {
-  const { user } = useAuth();
-
-  // ALGORITMO DE CAJA: Descuenta MP automáticos, extras manuales Y LOS LOTES PREPAGOS CONSUMIDOS
-  const menuCalculado = Math.max(0, totalMenuCaja - totalMpCaja - state.manual.acompMenuComensales - state.manual.subvencionados - totalLotesConsumidos);
-  const veggieCalculado = Math.max(0, totalVeggieCaja - state.manual.acompVeggieComensales);
-  const celiacoCalculado = totalCeliacoCaja;
+  const menuCalculado = Math.max(0, totalMenuEfectivo - state.manual.acompMenuComensales - state.manual.subvencionados);
+  const veggieCalculado = Math.max(0, totalVeggieEfectivo - state.manual.acompVeggieComensales);
+  const celiacoCalculado = totalCeliacoEfectivo;
 
   const recMenu = state.valorMenu * menuCalculado;
   const recVeggie = state.valorVeggie * veggieCalculado;
@@ -71,8 +71,6 @@ const RendicionBlock: React.FC<BlockProps> = ({
   // CÁLCULO DE INGRESOS POR LOTES (Se asume que el 100% entra por Mercado Pago a través del Webhook)
   const totalLotesMp = bundleSales.reduce((sum, b) => sum + (Number(b.monto) || 0), 0);
 
-  const totalComensales = totalMenuCaja + totalVeggieCaja + totalCeliacoCaja;
-  
   // El efectivo de la caja física se compone estrictamente de la venta tradicional del mostrador
   const totalEfectivo = recMenu + recVeggie + recCeliaco + recAcompMenu + recAcompVeggie;
   const totalMpFinal = recMp + totalLotesMp;
@@ -129,20 +127,6 @@ const RendicionBlock: React.FC<BlockProps> = ({
           </tr>
 
           <tr>
-            <td>ACOMP. TERAP. MENU</td>
-            <td><input className="editable-input" type="number" value={state.valorAcompMenu} onChange={(e) => updateState({ valorAcompMenu: Number(e.target.value) })} /></td>
-            <td><input className="editable-input" type="number" value={state.manual.acompMenuComensales} onChange={(e) => updateManual("acompMenuComensales", Number(e.target.value))} /></td>
-            <td className="num">{formatCurrency(recAcompMenu)}</td>
-          </tr>
-
-          <tr>
-            <td>ACOMP. TERAP. VEGGIE</td>
-            <td><input className="editable-input" type="number" value={state.valorAcompVeggie} onChange={(e) => updateState({ valorAcompVeggie: Number(e.target.value) })} /></td>
-            <td><input className="editable-input" type="number" value={state.manual.acompVeggieComensales} onChange={(e) => updateManual("acompVeggieComensales", Number(e.target.value))} /></td>
-            <td className="num">{formatCurrency(recAcompVeggie)}</td>
-          </tr>
-
-          <tr>
             <td style={{ color: "#3b82f6", fontWeight: "bold" }}>Extra sin cargo</td>
             <td>$ 0</td>
             <td><input className="editable-input" type="number" value={state.manual.subvencionados} onChange={(e) => updateManual("subvencionados", Number(e.target.value))} /></td>
@@ -183,7 +167,9 @@ const RendicionBlock: React.FC<BlockProps> = ({
       <div className="rendicion-totales" style={{ marginTop: 15 }}>
         <div>TOTAL DE COMENSALES: {totalComensales}</div>
         <div>TOTAL CAJA EFECTIVO: {formatCurrency(totalEfectivo)}</div>
-        <div>TOTAL CAJA MERCADO PAGO: {formatCurrency(totalMpFinal)}</div>
+        <div>TOTAL MERCADO PAGO · VENTA DIARIA: {formatCurrency(recMp)}</div>
+        <div>TOTAL MERCADO PAGO · VENTA POR LOTE: {formatCurrency(totalLotesMp)}</div>
+        <div>TOTAL MERCADO PAGO GENERAL: {formatCurrency(totalMpFinal)}</div>
       </div>
 
       <div className="rendicion-observaciones">
@@ -197,7 +183,7 @@ const RendicionBlock: React.FC<BlockProps> = ({
 
       <div className="rendicion-firma" style={{ marginTop: 30 }}>
         <div style={{ marginBottom: 8 }}>
-          RESPONSABLE: <strong>{user?.displayName || user?.email}</strong>
+          RESPONSABLE DE VENTA: <strong>{responsablesVenta.length > 0 ? responsablesVenta.join(" · ") : "Sin ventas registradas"}</strong>
         </div>
         <div className="firma-line" style={{ borderBottom: '1px solid #000', width: '250px', marginBottom: 4 }} />
         <span style={{ fontSize: 10, color: '#666' }}>FIRMA Y ACLARACIÓN</span>
@@ -252,27 +238,43 @@ const RendicionPage: React.FC = () => {
   }, []);
 
   const autoCounts = useMemo(() => {
-    let menuPaid = 0, veggiePaid = 0, celiacoPaid = 0;
+    let menuCash = 0, veggieCash = 0, celiacoCash = 0;
     let mpTotal = 0;
+    let totalComensales = 0;
 
     rows.forEach((r: any) => {
       const memberId = (r.member?.id ?? "").trim();
-      if (!r.voided && memberId !== "" && !r.isSubsidized) {
-        
-        if (r.itemType === "MENU") menuPaid++;
-        if (r.itemType === "VEGGIE") veggiePaid++;
-        if (r.itemType === "CELIACO") celiacoPaid++;
+      if (r.voided || r.manual || memberId === "") return;
 
-        if (r.paymentMethod === "MP") {
-          mpTotal++;
-        }
+      totalComensales++;
+      if (r.isSubsidized || r.paymentMethod === "SUBVENCIONADO" || r.paymentMethod === "LOTE_PREPAGO") return;
+
+      if (r.paymentMethod === "MP") {
+        mpTotal++;
+        return;
       }
+
+      if (r.itemType === "MENU") menuCash++;
+      if (r.itemType === "VEGGIE") veggieCash++;
+      if (r.itemType === "CELIACO") celiacoCash++;
     });
 
-    return { menuPaid, veggiePaid, celiacoPaid, mpTotal };
+    return { menuCash, veggieCash, celiacoCash, mpTotal, totalComensales };
   }, [rows]);
 
   const totalLotesConsumidos = useMemo(() => rows.filter(r => !r.voided && r.paymentMethod === "LOTE_PREPAGO").length, [rows]);
+
+  const responsablesVenta = useMemo(() => {
+    const sellers = new Map<string, string>();
+    rows.forEach((r: any) => {
+      if (r.voided || r.manual) return;
+      const key = r.seller?.uid || r.seller?.email;
+      if (!key) return;
+      const label = r.seller?.name?.trim() || r.seller?.email || "Usuario sin nombre";
+      sellers.set(key, label);
+    });
+    return Array.from(sellers.values()).sort((a, b) => a.localeCompare(b));
+  }, [rows]);
 
   const now = new Date();
   const fechaTexto = now.toLocaleDateString("es-AR");
@@ -285,9 +287,9 @@ const RendicionPage: React.FC = () => {
       const element = document.getElementById("rendicion-original");
       if (!element) throw new Error("No se encontró la tabla para imprimir");
       
-      const menuCalculado = Math.max(0, autoCounts.menuPaid - autoCounts.mpTotal - sharedState.manual.acompMenuComensales - sharedState.manual.subvencionados - totalLotesConsumidos);
-      const veggieCalculado = Math.max(0, autoCounts.veggiePaid - sharedState.manual.acompVeggieComensales);
-      const celiacoCalculado = autoCounts.celiacoPaid;
+      const menuCalculado = Math.max(0, autoCounts.menuCash - sharedState.manual.acompMenuComensales - sharedState.manual.subvencionados);
+      const veggieCalculado = Math.max(0, autoCounts.veggieCash - sharedState.manual.acompVeggieComensales);
+      const celiacoCalculado = autoCounts.celiacoCash;
 
       const recMenu = sharedState.valorMenu * menuCalculado;
       const recVeggie = sharedState.valorVeggie * veggieCalculado;
@@ -298,7 +300,7 @@ const RendicionPage: React.FC = () => {
 
       const totalLotesMp = bundleSales.reduce((sum, b) => sum + (Number(b.monto) || 0), 0);
 
-      const totalComensales = autoCounts.menuPaid + autoCounts.veggiePaid + autoCounts.celiacoPaid;
+      const totalComensales = autoCounts.totalComensales;
       const totalEfectivo = recMenu + recVeggie + recCeliaco + recAcompMenu + recAcompVeggie;
       const totalMpFinal = recMp + totalLotesMp;
       
@@ -329,10 +331,14 @@ const RendicionPage: React.FC = () => {
         timestamp: serverTimestamp(),
         pdfUrl: pdfUrl,
         observaciones: sharedState.observaciones,
+        responsablesVenta,
+        realizadoPor: responsablesVenta.join(" · "),
         totales: {
           comensalesTotales: totalComensales,
           efectivoPesos: totalEfectivo,
           mpPesos: totalMpFinal,
+          mpVentaDiariaPesos: recMp,
+          mpVentaLotesPesos: totalLotesMp,
           qtyEfectivo: qtyEfectivo,
           qtyMp: autoCounts.mpTotal,
           qtyExtraSinCargo: sharedState.manual.subvencionados,
@@ -353,12 +359,14 @@ const RendicionPage: React.FC = () => {
   const blockProps = {
     fechaTexto,
     diaSemana,
-    totalMenuCaja: autoCounts.menuPaid,
-    totalVeggieCaja: autoCounts.veggiePaid,
-    totalCeliacoCaja: autoCounts.celiacoPaid,
+    totalMenuEfectivo: autoCounts.menuCash,
+    totalVeggieEfectivo: autoCounts.veggieCash,
+    totalCeliacoEfectivo: autoCounts.celiacoCash,
+    totalComensales: autoCounts.totalComensales,
     totalMpCaja: autoCounts.mpTotal,
     totalLotesConsumidos,
     bundleSales,
+    responsablesVenta,
     state: sharedState,
     updateState: updateSharedState,
     updateManual: updateManualState

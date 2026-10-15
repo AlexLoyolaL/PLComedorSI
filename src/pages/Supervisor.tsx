@@ -51,6 +51,7 @@ export default function Supervisor() {
   // Gráficos y Métricas
   const [dailyData, setDailyData] = useState<any[]>([]);
   const [pieData, setPieData] = useState<any[]>([]);
+  const [subsidizedSalesPieData, setSubsidizedSalesPieData] = useState<any[]>([]);
   const [uniqueCount, setUniqueCount] = useState<number | null>(null);
 
   // Checkbox de Auditoría
@@ -93,6 +94,8 @@ export default function Supervisor() {
       let totalMenu = 0;
       let totalVeggie = 0;
       let totalCeliaco = 0;
+      let totalSales = 0;
+      let totalSubsidized = 0;
 
       snap.forEach((doc) => {
         const d = doc.data() as any;
@@ -112,10 +115,14 @@ export default function Supervisor() {
         // 2. Lógica financiera (la que ya tenías)
         let paid = d.financial?.paid;
         let subsidized = d.financial?.subsidized || 0;
+        const bundleSales = d.financial?.lotes_usados || 0;
 
         if (paid === undefined) {
           paid = cM + cV + cC + vM + vV + vC;
         }
+
+        totalSales += paid + bundleSales;
+        totalSubsidized += subsidized;
 
         const cash = d.payments?.cash || 0;
         const mp = d.payments?.mp || 0;
@@ -138,6 +145,11 @@ export default function Supervisor() {
         { name: "Veggie", value: totalVeggie, color: "#10b981" }, // Verde
         { name: "Celíaco", value: totalCeliaco, color: "#f59e0b" } // Naranja
       ].filter(item => item.value > 0)); // Filtramos los que estén en cero para no renderizar pedazos vacíos
+
+      setSubsidizedSalesPieData([
+        { name: "Ventas", value: totalSales, color: "#10b981" },
+        { name: "Subvencionados", value: totalSubsidized, color: "#3b82f6" },
+      ].filter(item => item.value > 0));
 
     } catch (e) {
       console.error("Error cargando gráficos", e);
@@ -395,6 +407,44 @@ export default function Supervisor() {
                   )}
                 </BarChart>
               </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="panel">
+            <div style={{ fontWeight: 700, marginBottom: 2, color: "#fff", textAlign: "center" }}>Subvencionados y Ventas</div>
+            <div style={{ color: "var(--muted)", fontSize: 12, textAlign: "center", marginBottom: 6 }}>
+              Distribución para el rango {start} a {end}
+            </div>
+            <div style={{ height: 260 }}>
+              {subsidizedSalesPieData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={subsidizedSalesPieData}
+                      dataKey="value"
+                      nameKey="name"
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={80}
+                      label={({ name, percent }: any) => `${name} ${(percent * 100).toFixed(0)}%`}
+                    >
+                      {subsidizedSalesPieData.map((entry, index) => (
+                        <Cell key={`subsidized-sales-${index}`} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      formatter={(value: any) => [`${value} platos`, "Cantidad"]}
+                      contentStyle={{ background: "rgba(18, 24, 42, 0.95)", border: "1px solid #334", borderRadius: 8, color: "#fff" }}
+                      itemStyle={{ color: "#fff" }}
+                    />
+                    <Legend wrapperStyle={{ color: "#fff", paddingTop: 10 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div style={{ display: "flex", height: "100%", justifyContent: "center", alignItems: "center", color: "var(--muted)" }}>
+                  No hay datos para este rango
+                </div>
+              )}
             </div>
           </div>
 

@@ -25,6 +25,8 @@ dayjs.extend(timezone);
 
 const TZ = "America/Argentina/Buenos_Aires";
 
+export type PaymentMethod = "EFECTIVO" | "MP" | "SUBVENCIONADO" | "LOTE_PREPAGO";
+
 // Capacidad por mesa
 export function tableCapacityFromKey(key: string): number {
   const n = parseInt(String(key).replace(/[^\d]/g, ""), 10);
@@ -155,7 +157,7 @@ export async function createSaleTx(params: {
   itemType: ItemType;
   dest: Destination;
   allowDouble: boolean;
-  paymentMethod: "EFECTIVO" | "MP" | "SUBVENCIONADO" | "LOTE_PREPAGO"; // <-- INYECTADO: Nuevo medio de pago
+  paymentMethod: PaymentMethod; // <-- INYECTADO: Nuevo medio de pago
 }) {
   const key = todayKey();
   const settingsRef = doc(db, "settings_day", key);
@@ -367,86 +369,150 @@ export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
 }
 
 // ---------- EDITAR VENTA (VERSIÓN OFFLINE-READY + PATOVICA DE MESAS) ----------
-export async function updateSaleTx(params: { saleId: string; newItemType: ItemType; newDest: Destination; }) {
-  const key = todayKey();
+export async function updateSaleTx(params: {
+  saleId: string;
+  newItemType: ItemType;
+  newDest: Destination;
+  newPaymentMethod: PaymentMethod;
+}) {
   const saleRef = doc(db, "sales", params.saleId);
-  const aggRef = doc(db, "dayAgg", key);
-
-  const s = await getDoc(saleRef).catch(() => null);
-  if (!s || !s.exists()) throw new Error("Venta no encontrada");
-  const sale: any = s.data();
-  if (sale.voided) throw new Error("No se puede editar una venta anulada");
 
   if (params.newDest.mode === "COMEDOR") {
     if (!params.newDest.table) throw new Error("Mesa obligatoria en COMEDOR");
     if (!mesaOk(params.newItemType, params.newDest.table)) throw new Error("Mesa inválida.");
   }
 
-  // EL PATOVICA: Validación estricta de ocupación de mesa
-  if (params.newDest.mode === "COMEDOR") {
-    const isMovingToNewTable = sale.destination.mode !== "COMEDOR" || sale.destination.table !== params.newDest.table;
-    if (isMovingToNewTable) {
-      const aggSnap = await getDoc(aggRef).catch(() => null);
-      if (aggSnap && aggSnap.exists()) {
-        const aggData = aggSnap.data() as any;
-        const targetTableKey = tableKey(params.newDest.table)!;
-        const currentOccupants = aggData.comedor?.byTable?.[targetTableKey] || 0;
-        const maxCapacity = tableCapacityFromKey(targetTableKey);
+  await runTransaction(db, async (tx) => {
+    const saleSnap = await tx.get(saleRef);
+    if (!saleSnap.exists()) throw new Error("Venta no encontrada");
+
+    const sale: any = saleSnap.data();
+    if (sale.voided) throw new Error("No se puede editar una venta anulada");
+
+    const key = sale.dateKey || todayKey();
+    const aggRef = doc(db, "dayAgg", key);
+    const memberRef = doc(db, "members", sale.member?.id || "_");
+    const subRef = doc(db, "subsidized_members", sale.member?.id || "_");
+    const [aggSnap, memberSnap, subSnap] = await Promise.all([
+      tx.get(aggRef),
+      tx.get(memberRef),
+      tx.get(subRef),
+    ]);
+
+    const oldPayment: PaymentMethod = sale.isSubsidized
+      ? "SUBVENCIONADO"
+      : (sale.paymentMethod || "EFECTIVO");
+    const newPayment = params.newPaymentMethod;
+
+    // Validar la capacidad cuando la edición mueve la venta a otra mesa.
+    if (params.newDest.mode === "COMEDOR") {
+      const oldTable = sale.destination?.mode === "COMEDOR" ? tableKey(sale.destination?.table) : null;
+      const newTable = tableKey(params.newDest.table);
+      if (oldTable !== newTable && aggSnap.exists() && newTable) {
+        const currentOccupants = (aggSnap.data() as any).comedor?.byTable?.[newTable] || 0;
+        const maxCapacity = tableCapacityFromKey(newTable);
         if (currentOccupants >= maxCapacity) {
-          throw new Error(`¡La ${tableLabelFromKey(targetTableKey)} ya está llena (${currentOccupants}/${maxCapacity})! Operación rechazada.`);
+          throw new Error(`¡La ${tableLabelFromKey(newTable)} ya está llena (${currentOccupants}/${maxCapacity})! Operación rechazada.`);
         }
       }
     }
-  }
 
-  // Calculamos la diferencia neta para no pisar datos
-  const diffComedor: any = {};
-  const diffVianda: any = {};
-  const diffTables: any = {};
-
-  // Restar lo viejo
-  if (sale.destination.mode === "COMEDOR") {
-    diffComedor[sale.itemType] = -1;
-    if (sale.destination.table) diffTables[tableKey(sale.destination.table)!] = -1;
-  } else {
-    diffVianda[sale.itemType] = -1;
-  }
-
-  // Sumar lo nuevo
-  if (params.newDest.mode === "COMEDOR") {
-    diffComedor[params.newItemType] = (diffComedor[params.newItemType] || 0) + 1;
-    if (params.newDest.table) diffTables[tableKey(params.newDest.table)!] = (diffTables[tableKey(params.newDest.table)!] || 0) + 1;
-  } else {
-    diffVianda[params.newItemType] = (diffVianda[params.newItemType] || 0) + 1;
-  }
-
-  // Construir el objeto anidado limpio
-  const upd: any = { lastUpdated: serverTimestamp() };
-
-  Object.keys(diffComedor).forEach(k => {
-    if (diffComedor[k] !== 0) {
-      if (!upd.comedor) upd.comedor = {};
-      upd.comedor[k] = increment(diffComedor[k]);
+    if (oldPayment !== newPayment && newPayment === "SUBVENCIONADO") {
+      const subData = subSnap.exists() ? (subSnap.data() as any) : null;
+      const expiresAt = subData?.expiresAt?.toDate ? dayjs(subData.expiresAt.toDate()) : null;
+      if (subData?.active !== true || (expiresAt && !dayjs().isBefore(expiresAt))) {
+        throw new Error("El socio no tiene un beneficio subvencionado activo.");
+      }
     }
-  });
 
-  Object.keys(diffVianda).forEach(k => {
-    if (diffVianda[k] !== 0) {
-      if (!upd.vianda) upd.vianda = {};
-      upd.vianda[k] = increment(diffVianda[k]);
+    if (oldPayment !== newPayment && newPayment === "LOTE_PREPAGO") {
+      const bundle = memberSnap.exists() ? (memberSnap.data() as any)?.active_bundle : null;
+      const expiresAt = bundle?.expiresAt?.toDate ? dayjs(bundle.expiresAt.toDate()) : null;
+      if (!bundle || Number(bundle.remaining) <= 0 || (expiresAt && !dayjs().isBefore(expiresAt))) {
+        throw new Error("El socio no tiene viandas disponibles en un lote activo.");
+      }
     }
-  });
 
-  Object.keys(diffTables).forEach(k => {
-    if (diffTables[k] !== 0) {
-      if (!upd.comedor) upd.comedor = {};
-      if (!upd.comedor.byTable) upd.comedor.byTable = {};
-      upd.comedor.byTable[k] = increment(diffTables[k]);
+    const diffComedor: Record<string, number> = {};
+    const diffVianda: Record<string, number> = {};
+    const diffTables: Record<string, number> = {};
+
+    if (sale.destination?.mode === "COMEDOR") {
+      diffComedor[sale.itemType] = -1;
+      const oldTable = tableKey(sale.destination?.table);
+      if (oldTable) diffTables[oldTable] = -1;
+    } else {
+      diffVianda[sale.itemType] = -1;
     }
-  });
 
-  setDoc(aggRef, upd, { merge: true });
-  setDoc(saleRef, { itemType: params.newItemType, destination: params.newDest, updatedAt: serverTimestamp() }, { merge: true });
+    if (params.newDest.mode === "COMEDOR") {
+      diffComedor[params.newItemType] = (diffComedor[params.newItemType] || 0) + 1;
+      const newTable = tableKey(params.newDest.table);
+      if (newTable) diffTables[newTable] = (diffTables[newTable] || 0) + 1;
+    } else {
+      diffVianda[params.newItemType] = (diffVianda[params.newItemType] || 0) + 1;
+    }
+
+    const financialWeight = (method: PaymentMethod) => ({
+      paid: method === "EFECTIVO" || method === "MP" ? 1 : 0,
+      subsidized: method === "SUBVENCIONADO" ? 1 : 0,
+      efectivo: method === "EFECTIVO" ? 1 : 0,
+      mp: method === "MP" ? 1 : 0,
+      lotes_usados: method === "LOTE_PREPAGO" ? 1 : 0,
+    });
+    const oldFinancial = financialWeight(oldPayment);
+    const newFinancial = financialWeight(newPayment);
+
+    const upd: any = { lastUpdated: serverTimestamp() };
+    Object.entries(diffComedor).forEach(([type, value]) => {
+      if (value !== 0) {
+        if (!upd.comedor) upd.comedor = {};
+        upd.comedor[type] = increment(value);
+      }
+    });
+    Object.entries(diffVianda).forEach(([type, value]) => {
+      if (value !== 0) {
+        if (!upd.vianda) upd.vianda = {};
+        upd.vianda[type] = increment(value);
+      }
+    });
+    Object.entries(diffTables).forEach(([table, value]) => {
+      if (value !== 0) {
+        if (!upd.comedor) upd.comedor = {};
+        if (!upd.comedor.byTable) upd.comedor.byTable = {};
+        upd.comedor.byTable[table] = increment(value);
+      }
+    });
+
+    if (oldPayment !== newPayment) {
+      upd.financial = {
+        paid: increment(newFinancial.paid - oldFinancial.paid),
+        subsidized: increment(newFinancial.subsidized - oldFinancial.subsidized),
+        efectivo: increment(newFinancial.efectivo - oldFinancial.efectivo),
+        mp: increment(newFinancial.mp - oldFinancial.mp),
+        lotes_usados: increment(newFinancial.lotes_usados - oldFinancial.lotes_usados),
+      };
+
+      const bundleDelta = (oldPayment === "LOTE_PREPAGO" ? 1 : 0) - (newPayment === "LOTE_PREPAGO" ? 1 : 0);
+      if (bundleDelta !== 0) {
+        tx.update(memberRef, { "active_bundle.remaining": increment(bundleDelta) });
+      }
+
+      const subsidizedDelta = (newPayment === "SUBVENCIONADO" ? 1 : 0) - (oldPayment === "SUBVENCIONADO" ? 1 : 0);
+      if (subsidizedDelta > 0 || (subsidizedDelta < 0 && subSnap.exists())) {
+        tx.set(subRef, { totalWithdrawals: increment(subsidizedDelta) }, { merge: true });
+      }
+    }
+
+    tx.set(aggRef, upd, { merge: true });
+    tx.set(saleRef, {
+      itemType: params.newItemType,
+      destination: params.newDest,
+      paymentMethod: newPayment,
+      isSubsidized: newPayment === "SUBVENCIONADO",
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  });
 }
 
 // ---------- Reconstruir agregado del día desde sales (AUDITORÍA FINANCIERA) ----------

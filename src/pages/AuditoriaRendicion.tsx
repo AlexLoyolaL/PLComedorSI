@@ -10,11 +10,14 @@ type AuditoriaRow = {
   pdfUrl: string;
   observaciones: string;
   realizadoPor: string; // El campo que agregamos para la firma digital
+  responsablesVenta?: string[];
   timestamp: any;
   totales: {
     comensalesTotales: number;
     efectivoPesos: number;
     mpPesos: number;
+    mpVentaDiariaPesos?: number;
+    mpVentaLotesPesos?: number;
     qtyEfectivo: number;
     qtyMp: number;
     qtySubvencionados: number;
@@ -61,7 +64,7 @@ function AuditoriaInner() {
               <thead>
                 <tr>
                   <th>Fecha</th>
-                  <th>Responsable</th>
+                  <th>Responsable de venta</th>
                   <th>Platos</th>
                   <th>Efectivo ($)</th>
                   <th>M. Pago ($)</th>
@@ -75,7 +78,9 @@ function AuditoriaInner() {
                   <tr key={row.dateKey}>
                     <td style={{ fontWeight: "bold" }}>{row.dateKey}</td>
                     <td style={{ fontSize: "0.9em", color: "var(--muted)" }}>
-                      {row.realizadoPor || "N/A"}
+                      {row.responsablesVenta?.length
+                        ? row.responsablesVenta.join(" · ")
+                        : row.realizadoPor || "N/A"}
                     </td>
                     <td>{row.totales.comensalesTotales}</td>
                     <td style={{ color: "#10b981", fontWeight: "bold" }}>
@@ -83,6 +88,11 @@ function AuditoriaInner() {
                     </td>
                     <td style={{ color: "#8b5cf6", fontWeight: "bold" }}>
                       $ {row.totales.mpPesos.toLocaleString("es-AR")}
+                      {(row.totales.mpVentaDiariaPesos !== undefined || row.totales.mpVentaLotesPesos !== undefined) && (
+                        <div style={{ color: "var(--muted)", fontSize: 11, fontWeight: 400 }}>
+                          Diaria: $ {(row.totales.mpVentaDiariaPesos ?? 0).toLocaleString("es-AR")} · Lotes: $ {(row.totales.mpVentaLotesPesos ?? 0).toLocaleString("es-AR")}
+                        </div>
+                      )}
                     </td>
                     <td>{row.totales.qtySubvencionados}</td>
                     <td 
