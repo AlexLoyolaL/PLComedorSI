@@ -12,9 +12,13 @@ import {
   documentId,
   getDocs,
   where,
+  writeBatch,
 } from "firebase/firestore";
 import { Card } from "../ui/Card";
 import { resolveMemberDni } from "../lib/memberId";
+import { isMemberAlertActive, memberProfileFromData } from "../lib/members";
+import type { MemberAlert, MemberProfile } from "../lib/members";
+import { useAuth } from "../state/AuthContext";
 import {
   ResponsiveContainer,
   BarChart,
@@ -49,7 +53,8 @@ function toDateInputValue(date: Date) {
 }
 
 export default function Gabinete() {
-  const [activeTab, setActiveTab] = useState<"alta" | "analisis">("alta");
+  const { user } = useAuth();
+  const [activeTab, setActiveTab] = useState<"alta" | "alertas" | "analisis">("alta");
 
   const [scanInput, setScanInput] = useState("");
   const [manualDni, setManualDni] = useState("");
@@ -59,6 +64,17 @@ export default function Gabinete() {
   const [members, setMembers] = useState<SubsidizedMember[]>([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState({ text: "", type: "" });
+
+  // --- Alertas operativas para Caja ---
+  const [alerts, setAlerts] = useState<MemberAlert[]>([]);
+  const [alertSearchInput, setAlertSearchInput] = useState("");
+  const [alertDni, setAlertDni] = useState("");
+  const [alertProfile, setAlertProfile] = useState<MemberProfile | null>(null);
+  const [alertMessage, setAlertMessage] = useState("");
+  const [alertLevel, setAlertLevel] = useState<MemberAlert["level"]>("INFO");
+  const [alertValidUntil, setAlertValidUntil] = useState("");
+  const [alertSaving, setAlertSaving] = useState(false);
+  const [alertMsg, setAlertMsg] = useState({ text: "", type: "" });
 
   // --- Datos para la pestaña de Análisis ---
   const [trendDays, setTrendDays] = useState(30);
@@ -80,6 +96,20 @@ export default function Gabinete() {
     }, (error) => {
       console.error("Error de Firestore:", error);
       setMsg({ text: "Acceso denegado a la base de datos. Avisá a mantenimiento.", type: "error" });
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "member_alerts"), (snap) => {
+      const list = snap.docs
+        .map((d) => ({ dni: d.id, ...d.data() } as MemberAlert))
+        .filter((item) => isMemberAlertActive(item, toDateInputValue(new Date())))
+        .sort((a, b) => a.dni.localeCompare(b.dni));
+      setAlerts(list);
+    }, (error) => {
+      console.error("Error cargando alertas:", error);
+      setAlertMsg({ text: "No se pudieron cargar las alertas.", type: "error" });
     });
     return () => unsub();
   }, []);
@@ -206,21 +236,40 @@ export default function Gabinete() {
   };
 
   const handleSave = async () => {
-    if (!memberId || !name || !lastName) {
+    if (!user || !memberId || !name || !lastName) {
       setMsg({ text: "Faltan datos obligatorios.", type: "error" });
       return;
     }
     const endOfYear = new Date(new Date().getFullYear(), 11, 31, 23, 59, 59);
     setLoading(true);
     try {
-    await setDoc(doc(db, "subsidized_members", memberId), {
-      name: name.toUpperCase(),
-      lastName: lastName.toUpperCase(),
-      active: true,
-      createdAt: serverTimestamp(), // "Desde cuando están"
-      expiresAt: endOfYear,         // "Vence a fin de año"
-      totalWithdrawals: 0,          // Iniciamos el contador
-    });
+      const normalizedName = name.trim().toUpperCase();
+      const normalizedLastName = lastName.trim().toUpperCase();
+      const actor = { uid: user.uid, email: user.email ?? "", name: user.displayName ?? "" };
+      const batch = writeBatch(db);
+
+      batch.set(doc(db, "subsidized_members", memberId), {
+        name: normalizedName,
+        lastName: normalizedLastName,
+        active: true,
+        createdAt: serverTimestamp(), // "Desde cuando están"
+        expiresAt: endOfYear,         // "Vence a fin de año"
+        totalWithdrawals: 0,          // Iniciamos el contador
+      });
+
+      // `members` es la ficha maestra compartida. Gabinete aporta los datos
+      // que conoce y Caja completa nacimiento, domicilio y residencia.
+      batch.set(doc(db, "members", memberId), {
+        id: memberId,
+        dni: memberId,
+        firstName: normalizedName,
+        name: normalizedName,
+        lastName: normalizedLastName,
+        updatedAt: serverTimestamp(),
+        updatedBy: actor,
+      }, { merge: true });
+
+      await batch.commit();
       
       setMsg({ text: "✅ Subvención habilitada con éxito.", type: "success" });
       // Limpiar formulario
@@ -332,6 +381,120 @@ export default function Gabinete() {
     setMigrating(false);
   };
 
+  const loadAlertByDni = async (dni: string) => {
+    setAlertMsg({ text: "", type: "" });
+    const [alertSnap, memberSnap, subsidizedSnap] = await Promise.all([
+      getDoc(doc(db, "member_alerts", dni)),
+      getDoc(doc(db, "members", dni)),
+      getDoc(doc(db, "subsidized_members", dni)),
+    ]);
+
+    setAlertDni(dni);
+    const masterProfile = memberSnap.exists() ? memberProfileFromData(dni, memberSnap.data()) : null;
+    const subsidizedData = subsidizedSnap.data();
+    setAlertProfile(
+      masterProfile?.firstName || masterProfile?.lastName
+        ? masterProfile
+        : subsidizedSnap.exists()
+          ? memberProfileFromData(dni, {
+              firstName: subsidizedData?.name,
+              lastName: subsidizedData?.lastName,
+            })
+          : masterProfile
+    );
+
+    if (alertSnap.exists()) {
+      const data = alertSnap.data() as MemberAlert;
+      setAlertMessage(data.message ?? "");
+      setAlertLevel(data.level === "IMPORTANTE" ? "IMPORTANTE" : "INFO");
+      setAlertValidUntil(data.validUntil ?? "");
+      const isActive = isMemberAlertActive({ dni, ...data }, toDateInputValue(new Date()));
+      setAlertMsg({
+        text: isActive
+          ? "Alerta activa encontrada."
+          : data.active && data.validUntil
+            ? "La alerta venció. Podés reactivarla cambiando la vigencia y guardando."
+            : "La alerta anterior está desactivada. Podés reactivarla guardando.",
+        type: "info",
+      });
+    } else {
+      setAlertMessage("");
+      setAlertLevel("INFO");
+      setAlertValidUntil("");
+      setAlertMsg({ text: "El DNI no tiene alertas. Podés crear una.", type: "info" });
+    }
+  };
+
+  const handleAlertSearch = async () => {
+    if (!alertSearchInput.trim()) return;
+    try {
+      const dni = await resolveMemberDni(alertSearchInput);
+      if (!dni || !PURE_DNI_RE.test(dni)) {
+        setAlertMsg({ text: "Ingresá o escaneá un DNI válido.", type: "error" });
+        return;
+      }
+      setAlertSearchInput("");
+      await loadAlertByDni(dni);
+    } catch (e: any) {
+      setAlertMsg({ text: e?.message || String(e), type: "error" });
+    }
+  };
+
+  const saveAlert = async () => {
+    if (!user || !alertDni || !alertMessage.trim()) {
+      setAlertMsg({ text: "El mensaje de la alerta es obligatorio.", type: "error" });
+      return;
+    }
+
+    setAlertSaving(true);
+    try {
+      const alertRef = doc(db, "member_alerts", alertDni);
+      const current = await getDoc(alertRef);
+      const actor = { uid: user.uid, email: user.email ?? "", name: user.displayName ?? "" };
+      const payload: any = {
+        dni: alertDni,
+        active: true,
+        message: alertMessage.trim(),
+        level: alertLevel,
+        validUntil: alertValidUntil || null,
+        updatedAt: serverTimestamp(),
+        updatedBy: actor,
+        removedAt: null,
+        removedBy: null,
+      };
+      if (!current.exists()) {
+        payload.createdAt = serverTimestamp();
+        payload.createdBy = actor;
+      }
+      await setDoc(alertRef, payload, { merge: true });
+      setAlertMsg({ text: "✅ Alerta guardada. Caja la verá al identificar a este socio.", type: "success" });
+    } catch (e: any) {
+      setAlertMsg({ text: "Error al guardar la alerta: " + (e?.message || String(e)), type: "error" });
+    } finally {
+      setAlertSaving(false);
+    }
+  };
+
+  const deactivateAlert = async () => {
+    if (!user || !alertDni) return;
+    if (!confirm("¿Desactivar esta alerta? Dejará de mostrarse en Caja.")) return;
+
+    setAlertSaving(true);
+    try {
+      await setDoc(doc(db, "member_alerts", alertDni), {
+        active: false,
+        removedAt: serverTimestamp(),
+        removedBy: { uid: user.uid, email: user.email ?? "", name: user.displayName ?? "" },
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+      setAlertMsg({ text: "Alerta desactivada correctamente.", type: "success" });
+    } catch (e: any) {
+      setAlertMsg({ text: "Error al desactivar: " + (e?.message || String(e)), type: "error" });
+    } finally {
+      setAlertSaving(false);
+    }
+  };
+
   return (
     <div style={{ display: "grid", gap: 16 }}>
       {/* --- NAVEGADOR DE SOLAPAS --- */}
@@ -341,6 +504,12 @@ export default function Gabinete() {
           style={{ padding: "8px 16px", fontWeight: "bold", borderRadius: "4px 4px 0 0", background: activeTab === "alta" ? "#3b82f6" : "transparent", color: activeTab === "alta" ? "#fff" : "#4a5568", border: "none", cursor: "pointer" }}
         >
           📋 Alta y Padrón
+        </button>
+        <button
+          onClick={() => setActiveTab("alertas")}
+          style={{ padding: "8px 16px", fontWeight: "bold", borderRadius: "4px 4px 0 0", background: activeTab === "alertas" ? "#f59e0b" : "transparent", color: activeTab === "alertas" ? "#fff" : "#4a5568", border: "none", cursor: "pointer" }}
+        >
+          ⚠️ Alertas
         </button>
         <button
           onClick={() => setActiveTab("analisis")}
@@ -511,6 +680,117 @@ export default function Gabinete() {
                 </tbody>
               </table>
             </div>
+          </Card>
+        </div>
+      ) : activeTab === "alertas" ? (
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 1fr) 2fr", gap: 16, alignItems: "start" }}>
+          <Card title="Buscar socio y administrar alerta">
+            <div style={{ display: "grid", gap: 12 }}>
+              <div>
+                <label style={{ display: "block", fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
+                  Escanear carnet o ingresar DNI
+                </label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    className="input"
+                    placeholder="DNI sin puntos o código del carnet"
+                    value={alertSearchInput}
+                    onChange={(e) => setAlertSearchInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleAlertSearch()}
+                  />
+                  <button className="button" onClick={handleAlertSearch}>Buscar</button>
+                </div>
+              </div>
+
+              {alertDni && (
+                <div className="panel" style={{ display: "grid", gap: 12, borderColor: alertLevel === "IMPORTANTE" ? "#f59e0b" : "var(--border)" }}>
+                  <div>
+                    <div style={{ fontSize: 12, color: "var(--muted)" }}>Socio seleccionado</div>
+                    <div style={{ fontSize: 18, fontWeight: 800 }}>
+                      {alertProfile?.firstName || alertProfile?.lastName
+                        ? `${alertProfile.lastName}, ${alertProfile.firstName}`
+                        : "Sin ficha maestra cargada"}
+                    </div>
+                    <div>DNI: <b>{alertDni}</b></div>
+                  </div>
+
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <span style={{ fontWeight: 700 }}>Nivel</span>
+                    <select className="input" value={alertLevel} onChange={(e) => setAlertLevel(e.target.value as MemberAlert["level"])}>
+                      <option value="INFO">Informativa</option>
+                      <option value="IMPORTANTE">Importante</option>
+                    </select>
+                  </label>
+
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <span style={{ fontWeight: 700 }}>Mensaje que verá Caja</span>
+                    <textarea
+                      className="input"
+                      value={alertMessage}
+                      onChange={(e) => setAlertMessage(e.target.value)}
+                      rows={5}
+                      maxLength={500}
+                      placeholder="Indicá la acción que debe realizar el personal de Caja, sin incluir datos sensibles innecesarios."
+                    />
+                    <span style={{ color: "var(--muted)", fontSize: 11 }}>{alertMessage.length}/500</span>
+                  </label>
+
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <span style={{ fontWeight: 700 }}>Vigente hasta (opcional)</span>
+                    <input className="input" type="date" value={alertValidUntil} onChange={(e) => setAlertValidUntil(e.target.value)} />
+                  </label>
+
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button className="button" onClick={saveAlert} disabled={alertSaving || !alertMessage.trim()}>
+                      {alertSaving ? "Guardando..." : "Guardar y activar"}
+                    </button>
+                    {alerts.some((item) => item.dni === alertDni) && (
+                      <button className="button outline" onClick={deactivateAlert} disabled={alertSaving}>Desactivar</button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {alertMsg.text && (
+                <div style={{
+                  padding: 10,
+                  borderRadius: 8,
+                  color: alertMsg.type === "error" ? "var(--danger)" : alertMsg.type === "success" ? "var(--ok)" : "var(--brand)",
+                  border: `1px solid ${alertMsg.type === "error" ? "var(--danger)" : alertMsg.type === "success" ? "var(--ok)" : "var(--brand)"}`,
+                }}>
+                  {alertMsg.text}
+                </div>
+              )}
+            </div>
+          </Card>
+
+          <Card title={`Alertas activas (${alerts.length})`}>
+            {alerts.length === 0 ? (
+              <div style={{ color: "var(--muted)" }}>No hay alertas activas.</div>
+            ) : (
+              <div style={{ maxHeight: "70vh", overflow: "auto" }}>
+                <table className="table">
+                  <thead>
+                    <tr><th>DNI</th><th>Nivel</th><th>Mensaje</th><th>Vigencia</th><th></th></tr>
+                  </thead>
+                  <tbody>
+                    {alerts.map((item) => (
+                      <tr key={item.dni}>
+                        <td style={{ fontWeight: 700 }}>{item.dni}</td>
+                        <td>
+                          <span className="badge" style={{ borderColor: item.level === "IMPORTANTE" ? "#f59e0b" : "#3b82f6" }}>
+                            {item.level === "IMPORTANTE" ? "Importante" : "Informativa"}
+                          </span>
+                        </td>
+                        <td style={{ maxWidth: 420, whiteSpace: "normal" }}>{item.message}</td>
+                        <td>{item.validUntil || "Sin vencimiento"}</td>
+                        <td><button className="button ghost" onClick={() => loadAlertByDni(item.dni)}>Editar</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </Card>
         </div>
       ) : (

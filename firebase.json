@@ -1,4 +1,7 @@
 {
+  "firestore": {
+    "rules": "src/firestore.rules"
+  },
   "functions": [
     {
       "source": "functions",

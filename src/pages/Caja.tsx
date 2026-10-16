@@ -11,10 +11,12 @@ import {
 } from "../lib/sales";
 import type { PaymentMethod } from "../lib/sales";
 import { Card } from "../ui/Card";
-import { doc, onSnapshot, collection, query, orderBy, where } from "firebase/firestore";
+import { doc, onSnapshot, collection, query, orderBy, where, getDoc, setDoc, serverTimestamp, writeBatch } from "firebase/firestore";
 import { db } from "../firebase";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { resolveMemberDni } from "../lib/memberId";
+import { emptyMemberProfile, isMemberAlertActive, memberProfileFromData, residencyLabel } from "../lib/members";
+import type { MemberAlert, MemberProfile } from "../lib/members";
 
 type Row = {
   id: string;
@@ -54,9 +56,10 @@ function hasEnter(s: string) {
 }
 
 export default function Caja() {
-  const { user } = useAuth();
+  const { user, role } = useAuth();
 
-  const [activeTab, setActiveTab] = useState<"caja_rapida" | "venta_lotes">("caja_rapida");
+  const [activeTab, setActiveTab] = useState<"caja_rapida" | "venta_lotes" | "maestro_socios">("caja_rapida");
+  const canEditMemberProfiles = role === "root" || role === "administrador" || role === "administrativo";
 
   const [memberInput, setMemberInput] = useState("");
   const [orderInput, setOrderInput] = useState("");
@@ -70,6 +73,10 @@ export default function Caja() {
   const [paymentMethod, setPaymentMethod] = useState<"EFECTIVO" | "MP" | "SUBVENCIONADO" | "LOTE_PREPAGO" | null>(null); 
   
   const [memberBundleRemaining, setMemberBundleRemaining] = useState<number | null>(null); 
+  const [memberProfile, setMemberProfile] = useState<MemberProfile | null>(null);
+  const [memberAlert, setMemberAlert] = useState<MemberAlert | null>(null);
+  const [alertAcknowledged, setAlertAcknowledged] = useState(false);
+  const memberLookupRef = useRef(0);
 
   const [isLoading, setIsLoading] = useState(false);
   const lastScansRef = useRef<Map<string, number>>(new Map());
@@ -109,6 +116,13 @@ export default function Caja() {
   const [loteLoading, setLoteLoading] = useState(false);
   const [generatedLink, setGeneratedLink] = useState("");
   const [bundleSales, setBundleSales] = useState<any[]>([]);
+
+  // Maestro de socios administrado por Caja
+  const [profileSearchInput, setProfileSearchInput] = useState("");
+  const [profileDraft, setProfileDraft] = useState<MemberProfile | null>(null);
+  const [profileExists, setProfileExists] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileMsg, setProfileMsg] = useState("");
 
   // Nombre y apellido de los socios subsidiados (Gabinete Social), para
   // mostrarlos junto al DNI en el listado de ventas en vez de solo el número.
@@ -188,9 +202,14 @@ export default function Caja() {
   useEffect(() => {
     if (!memberId) {
       setMemberBundleRemaining(null);
+      setMemberProfile(null);
+      setMemberAlert(null);
+      setAlertAcknowledged(false);
       setIsSubsidized(false);
       return;
     }
+
+    setAlertAcknowledged(false);
 
     const unsubSub = onSnapshot(doc(db, "subsidized_members", memberId), (snap) => {
       setIsSubsidized(snap.exists() && snap.data()?.active === true);
@@ -198,7 +217,9 @@ export default function Caja() {
 
     const unsubMember = onSnapshot(doc(db, "members", memberId), (snap) => {
       if (snap.exists()) {
-        const bundle = snap.data()?.active_bundle;
+        const data = snap.data();
+        setMemberProfile(memberProfileFromData(memberId, data));
+        const bundle = data?.active_bundle;
         const now = new Date(); 
         const expires = bundle?.expiresAt?.toDate ? bundle.expiresAt.toDate() : null;
         if (bundle && bundle.remaining > 0 && (!expires || now < expires)) {
@@ -208,15 +229,37 @@ export default function Caja() {
         }
       } else {
         setMemberBundleRemaining(null);
+        setMemberProfile(null);
       }
     });
 
-    return () => { unsubSub(); unsubMember(); };
+    const unsubAlert = onSnapshot(
+      doc(db, "member_alerts", memberId),
+      (snap) => {
+        const alert = snap.exists() ? ({ dni: memberId, ...snap.data() } as MemberAlert) : null;
+        setMemberAlert(isMemberAlertActive(alert, todayKey()) ? alert : null);
+      },
+      (error) => {
+        console.warn("No se pudo actualizar la alerta del socio:", error);
+      }
+    );
+
+    return () => { unsubSub(); unsubMember(); unsubAlert(); };
   }, [memberId]);
+
+  const hasPendingAlert = isMemberAlertActive(memberAlert, todayKey()) && !alertAcknowledged;
+  const profileDraftStatus = profileDraft
+    ? memberProfileFromData(profileDraft.dni, profileDraft).profileStatus
+    : null;
+  const selectedMemberName = memberProfile?.firstName || memberProfile?.lastName
+    ? `${memberProfile.lastName}, ${memberProfile.firstName}`
+    : memberId && subsidizedNames[memberId]
+      ? `${subsidizedNames[memberId].lastName}, ${subsidizedNames[memberId].name}`
+      : "";
 
   // --- NUEVO: PLC AUTO-DISPARADOR (Evita la condición de carrera del escáner) ---
   useEffect(() => {
-    if (order && !paymentMethod && !isLoading) {
+    if (order && !paymentMethod && !isLoading && !hasPendingAlert) {
       if (isSubsidized) {
         setPaymentMethod("SUBVENCIONADO");
         confirmIfReady(false, order, "SUBVENCIONADO");
@@ -225,7 +268,7 @@ export default function Caja() {
         confirmIfReady(false, order, "LOTE_PREPAGO");
       }
     }
-  }, [order, memberBundleRemaining, isSubsidized, paymentMethod, isLoading]);
+  }, [order, memberBundleRemaining, isSubsidized, paymentMethod, isLoading, hasPendingAlert]);
 
   const filteredRows = useMemo(() => {
     let base = rows.filter((r) => !r.manual);
@@ -297,6 +340,7 @@ export default function Caja() {
 
   async function handleSocioEnter(scannedText: string) {
     if (!scannedText || scannedText.trim() === "") return;
+    const lookupId = ++memberLookupRef.current;
 
     try {
       // resolveMemberDni usa la MISMA lógica que Gabinete Social para
@@ -311,13 +355,29 @@ export default function Caja() {
         return;
       }
 
-      setMemberId(finalDni);
+      let activeAlert: MemberAlert | null = null;
+      try {
+        const alertSnap = await getDoc(doc(db, "member_alerts", finalDni));
+        const alert = alertSnap.exists() ? ({ dni: finalDni, ...alertSnap.data() } as MemberAlert) : null;
+        activeAlert = isMemberAlertActive(alert, todayKey()) ? alert : null;
+      } catch (alertError: any) {
+        // Una falla transitoria no debe dejar Caja inutilizable. Se informa al
+        // operador que la verificacion no pudo completarse y la venta continua.
+        console.warn("No se pudo verificar la alerta del socio:", alertError);
+        setMsg("⚠️ No se pudieron verificar las alertas en este momento. Revisá la conexión.");
+      }
+      if (lookupId !== memberLookupRef.current) return;
 
-      // Ya no frenamos el proceso con un await acá. El foco pasa al pedido instantáneamente.
-      setTimeout(() => {
-        pedidoRef.current?.focus();
-        pedidoRef.current?.select?.();
-      }, 50);
+      setMemberId(finalDni);
+      setMemberAlert(activeAlert);
+      setAlertAcknowledged(false);
+
+      if (!activeAlert) {
+        setTimeout(() => {
+          pedidoRef.current?.focus();
+          pedidoRef.current?.select?.();
+        }, 50);
+      }
 
     } catch (e: any) {
       setMsg(e.message);
@@ -328,6 +388,10 @@ export default function Caja() {
   }
 
   function handlePedidoEnter() {
+    if (hasPendingAlert) {
+      setMsg("Confirmá la alerta del socio antes de continuar.");
+      return;
+    }
     try {
       const p = parseOrderQR(orderInput);
       setOrder(p); 
@@ -354,6 +418,10 @@ export default function Caja() {
 
   async function confirmIfReady(allowDouble: boolean, orderOverride?: OrderData, paymentOverride?: "EFECTIVO" | "MP" | "SUBVENCIONADO" | "LOTE_PREPAGO") {
     if (isLoading) return;
+    if (hasPendingAlert) {
+      setMsg("Confirmá la alerta del socio antes de registrar la venta.");
+      return;
+    }
     const currentOrder = orderOverride ?? order; 
     const finalPayment = paymentOverride ?? paymentMethod;
     if (!user || !currentOrder || !memberId) return;
@@ -379,6 +447,7 @@ export default function Caja() {
       lastScansRef.current.set(memberId, Date.now()); 
       beep(true);
       setMemberInput(""); setOrderInput(""); setPaymentInput(""); setMemberId(""); setOrder(null); setIsSubsidized(false); setPaymentMethod(null); setMemberBundleRemaining(null);
+      setMemberProfile(null); setMemberAlert(null); setAlertAcknowledged(false);
       setTimeout(() => socioRef.current?.focus(), 50);
     } catch (e: any) {
       const m = String(e.message || e); 
@@ -386,6 +455,109 @@ export default function Caja() {
       else setMsg(m); 
       beep(false);
     } finally { setIsLoading(false); }
+  }
+
+  function acknowledgeMemberAlert() {
+    setAlertAcknowledged(true);
+    setMsg("");
+    setTimeout(() => {
+      pedidoRef.current?.focus();
+      pedidoRef.current?.select?.();
+    }, 50);
+  }
+
+  async function loadMemberProfile(rawIdentifier: string, switchTab = true) {
+    if (!rawIdentifier.trim()) return;
+    setProfileMsg("");
+    try {
+      const dni = await resolveMemberDni(rawIdentifier);
+      if (!dni) throw new Error("No se pudo resolver un DNI válido.");
+      const snap = await getDoc(doc(db, "members", dni));
+      setProfileExists(snap.exists());
+      let draft = snap.exists() ? memberProfileFromData(dni, snap.data()) : emptyMemberProfile(dni);
+      if (!draft.firstName || !draft.lastName) {
+        const subsidizedSnap = await getDoc(doc(db, "subsidized_members", dni));
+        const subsidized = subsidizedSnap.data();
+        if (subsidizedSnap.exists()) {
+          draft = memberProfileFromData(dni, {
+            ...draft,
+            firstName: draft.firstName || subsidized?.name,
+            lastName: draft.lastName || subsidized?.lastName,
+          });
+        }
+      }
+      setProfileDraft(draft);
+      setProfileSearchInput("");
+      setProfileMsg(snap.exists() ? "Ficha cargada." : "El socio todavía no tiene ficha. Completá sus datos para crearla.");
+      if (switchTab) setActiveTab("maestro_socios");
+    } catch (e: any) {
+      setProfileMsg(e?.message || String(e));
+    }
+  }
+
+  async function saveMemberProfile(e: React.FormEvent) {
+    e.preventDefault();
+    if (!user || !profileDraft || !canEditMemberProfiles) return;
+
+    const normalized = memberProfileFromData(profileDraft.dni, profileDraft);
+    if (!normalized.firstName.trim() || !normalized.lastName.trim()) {
+      setProfileMsg("Nombre y apellido son obligatorios.");
+      return;
+    }
+
+    setProfileSaving(true);
+    setProfileMsg("");
+    try {
+      const memberRef = doc(db, "members", normalized.dni);
+      const subsidizedRef = doc(db, "subsidized_members", normalized.dni);
+      const [current, subsidized] = await Promise.all([
+        getDoc(memberRef),
+        getDoc(subsidizedRef),
+      ]);
+      const actor = { uid: user.uid, email: user.email ?? "", name: user.displayName ?? "" };
+      const payload: any = {
+        id: normalized.dni,
+        dni: normalized.dni,
+        firstName: normalized.firstName.trim().toUpperCase(),
+        name: normalized.firstName.trim().toUpperCase(),
+        lastName: normalized.lastName.trim().toUpperCase(),
+        birthDate: normalized.birthDate,
+        address: {
+          street: normalized.address.street.trim().toUpperCase(),
+          number: normalized.address.number.trim().toUpperCase(),
+          locality: normalized.address.locality.trim().toUpperCase(),
+        },
+        residencyStatus: normalized.residencyStatus,
+        profileStatus: normalized.profileStatus,
+        updatedAt: serverTimestamp(),
+        updatedBy: actor,
+      };
+      if (!current.exists()) {
+        payload.createdAt = serverTimestamp();
+        payload.createdBy = actor;
+        payload.active = true;
+      }
+      const batch = writeBatch(db);
+      batch.set(memberRef, payload, { merge: true });
+      if (subsidized.exists()) {
+        // Si además es subvencionado, mantenemos compatible el padrón legado
+        // para que ambas pantallas muestren siempre el mismo nombre.
+        batch.set(subsidizedRef, {
+          name: payload.firstName,
+          lastName: payload.lastName,
+        }, { merge: true });
+      }
+      await batch.commit();
+      const savedProfile = memberProfileFromData(normalized.dni, payload);
+      setProfileDraft(savedProfile);
+      setProfileExists(true);
+      if (memberId === normalized.dni) setMemberProfile(savedProfile);
+      setProfileMsg(`✅ Ficha guardada como ${savedProfile.profileStatus.toLowerCase()}.`);
+    } catch (e: any) {
+      setProfileMsg("Error al guardar la ficha: " + (e?.message || String(e)));
+    } finally {
+      setProfileSaving(false);
+    }
   }
 
   useEffect(() => { 
@@ -479,6 +651,11 @@ export default function Caja() {
         <button onClick={() => setActiveTab("venta_lotes")} style={{ padding: "8px 16px", fontWeight: "bold", borderRadius: "4px 4px 0 0", background: activeTab === "venta_lotes" ? "#10b981" : "transparent", color: activeTab === "venta_lotes" ? "#fff" : "#4a5568", border: "none", cursor: "pointer" }}>
           📅 Vender Lote Mensual (Mercado Pago)
         </button>
+        {canEditMemberProfiles && (
+          <button onClick={() => setActiveTab("maestro_socios")} style={{ padding: "8px 16px", fontWeight: "bold", borderRadius: "4px 4px 0 0", background: activeTab === "maestro_socios" ? "#8b5cf6" : "transparent", color: activeTab === "maestro_socios" ? "#fff" : "#4a5568", border: "none", cursor: "pointer" }}>
+            👤 Maestro de Socios
+          </button>
+        )}
       </div>
 
       {activeTab === "caja_rapida" ? (
@@ -496,8 +673,21 @@ export default function Caja() {
                 <input ref={socioRef} className="input" disabled={isLoading} placeholder="Posicioná el cursor aquí y escaneá el QR del socio" value={memberInput} onChange={(e) => { const v = e.target.value; setMemberInput(v); if (hasEnter(v)) { const clean = v.replace(/[\r\n]+/g, " ").trim(); setMemberInput(clean); handleSocioEnter(clean); } }} onKeyDown={(e) => { if (e.key === "Enter" || e.key === "NumpadEnter") { e.preventDefault(); handleSocioEnter(memberInput); } }} />
                 <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                   <span>Socio: <b>{memberId || "-"}</b></span>
+                  {memberId && selectedMemberName && (
+                    <span style={{ fontWeight: 700 }}>{selectedMemberName}</span>
+                  )}
+                  {memberId && (
+                    <span className="badge" style={{ borderColor: memberProfile?.profileStatus === "COMPLETO" ? "#22c55e" : "#f59e0b" }}>
+                      {memberProfile?.profileStatus === "COMPLETO" ? residencyLabel(memberProfile.residencyStatus) : "Ficha incompleta"}
+                    </span>
+                  )}
                   {isSubsidized && ( <span style={{ background: '#3b82f6', color: '#fff', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 'bold' }}>🎁 SUBVENCIONADO</span> )}
                   {memberBundleRemaining !== null && ( <span style={{ background: '#10b981', color: '#fff', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 'bold' }}>🎟️ LOTE ACTIVO: {memberBundleRemaining} viandas</span> )}
+                  {memberId && canEditMemberProfiles && (
+                    <button className="button ghost" style={{ padding: "5px 10px" }} onClick={() => loadMemberProfile(memberId)}>
+                      {memberProfile ? "Editar ficha" : "Completar ficha"}
+                    </button>
+                  )}
                 </div>
                 {memberBundleRemaining !== null && memberBundleRemaining <= 3 && ( <div style={{ background: "rgba(239, 68, 68, 0.15)", border: "1px solid #ef4444", color: "#b91c1c", padding: 10, borderRadius: 6, fontWeight: "bold", marginTop: 8 }}>⚠️ ¡ATENCIÓN! Al socio le quedan solo {memberBundleRemaining} viandas en su lote. ¡Avisarle para renovar!</div> )}
               </div>
@@ -505,7 +695,7 @@ export default function Caja() {
 
             <Card title="2) Escanear pedido (comida + destino)">
               <div style={{ display: "grid", gap: 8 }}>
-                <input ref={pedidoRef} className="input" disabled={isLoading} placeholder="Luego escaneá el QR de MENU/VEGGIE + MESA/VIANDA" value={orderInput} onChange={(e) => { const v = e.target.value; setOrderInput(v); if (hasEnter(v)) { const clean = v.replace(/[\r\n]+/g, " ").trim(); setOrderInput(clean); handlePedidoEnter(); } }} onKeyDown={(e) => { if (e.key === "Enter" || e.key === "NumpadEnter") { e.preventDefault(); handlePedidoEnter(); } }} />
+                  <input ref={pedidoRef} className="input" disabled={isLoading || hasPendingAlert} placeholder={hasPendingAlert ? "Confirmá la alerta antes de continuar" : "Luego escaneá el QR de MENU/VEGGIE + MESA/VIANDA"} value={orderInput} onChange={(e) => { const v = e.target.value; setOrderInput(v); if (hasEnter(v)) { const clean = v.replace(/[\r\n]+/g, " ").trim(); setOrderInput(clean); handlePedidoEnter(); } }} onKeyDown={(e) => { if (e.key === "Enter" || e.key === "NumpadEnter") { e.preventDefault(); handlePedidoEnter(); } }} />
                 <div>Pedido: <b>{order ? `${order.itemType} • ${order.dest.mode}${order.dest.table ? " • " + order.dest.table : ""}` : "-"}</b></div>
               </div>
             </Card>
@@ -521,7 +711,7 @@ export default function Caja() {
 
             <Card title={(isSubsidized || memberBundleRemaining !== null) ? "3) Confirmar" : "4) Confirmar (Opcional si escaneó)"} right={<span style={{ color: "#9aa4c0" }}>Enter en “Pago” confirma.</span>}>
               {dupInfo.needed ? ( <div className="panel" style={{ borderColor: "var(--warn)", background: "rgba(245,158,11,.08)", marginBottom: 10 }}><div style={{ fontWeight: 700, marginBottom: 6 }}>Doble compra detectada</div><div style={{ color: "var(--muted)", marginBottom: 10 }}>{dupInfo.message}</div><div style={{ display: "flex", gap: 8 }}><button className="button" disabled={isLoading} onClick={() => confirmIfReady(true)}>{isLoading ? "Procesando..." : "Permitir y confirmar (F2)"}</button><button className="button outline" disabled={isLoading} onClick={() => { setDupInfo({ needed: false, message: "" }); setTimeout(() => socioRef.current?.focus(), 50); }}>Cancelar</button></div></div> ) : ( <div style={{ color: "var(--muted)" }}>Si hay duplicado se mostrará un aviso.</div> )}
-              <div style={{ marginTop: 8, display: "flex", gap: 8 }}><button className="button" disabled={!ready || isLoading} onClick={() => confirmIfReady(false)}>{isLoading ? "Procesando..." : "Guardar Manualmente"}</button><button className="button outline" disabled={isLoading} onClick={() => { setMemberInput(""); setOrderInput(""); setPaymentInput(""); setMemberId(""); setOrder(null); setIsSubsidized(false); setPaymentMethod(null); setMemberBundleRemaining(null); setMsg(""); setDupInfo({ needed: false, message: "" }); socioRef.current?.focus(); }}>Limpiar</button></div>
+              <div style={{ marginTop: 8, display: "flex", gap: 8 }}><button className="button" disabled={!ready || isLoading || hasPendingAlert} onClick={() => confirmIfReady(false)}>{isLoading ? "Procesando..." : "Guardar Manualmente"}</button><button className="button outline" disabled={isLoading} onClick={() => { memberLookupRef.current += 1; setMemberInput(""); setOrderInput(""); setPaymentInput(""); setMemberId(""); setOrder(null); setIsSubsidized(false); setPaymentMethod(null); setMemberBundleRemaining(null); setMemberProfile(null); setMemberAlert(null); setAlertAcknowledged(false); setMsg(""); setDupInfo({ needed: false, message: "" }); socioRef.current?.focus(); }}>Limpiar</button></div>
               <div style={{ marginTop: 8, color: msg ? "var(--danger)" : "inherit", minHeight: 20 }}>{msg}</div>
             </Card>
           </div>
@@ -575,7 +765,7 @@ export default function Caja() {
             </Card>
           </div>
         </div>
-      ) : (
+      ) : activeTab === "venta_lotes" ? (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
           
           <Card title="Generar Link de Pago para Lote Mensual">
@@ -692,6 +882,150 @@ export default function Caja() {
             </Card>
           </div>
 
+        </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, .8fr) 2fr", gap: 16, alignItems: "start" }}>
+          <Card title="Buscar socio">
+            <div style={{ display: "grid", gap: 12 }}>
+              <p style={{ margin: 0, color: "var(--muted)" }}>
+                Escaneá un carnet o ingresá el DNI para crear o actualizar su ficha maestra.
+              </p>
+              <input
+                className="input"
+                placeholder="DNI sin puntos o código del carnet"
+                value={profileSearchInput}
+                onChange={(e) => setProfileSearchInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && loadMemberProfile(profileSearchInput, false)}
+              />
+              <button className="button" onClick={() => loadMemberProfile(profileSearchInput, false)}>Buscar</button>
+              {memberId && (
+                <button className="button outline" onClick={() => loadMemberProfile(memberId, false)}>
+                  Cargar socio actual: {memberId}
+                </button>
+              )}
+              {profileMsg && (
+                <div style={{ color: profileMsg.startsWith("✅") ? "var(--ok)" : "var(--muted)", fontSize: 13 }}>
+                  {profileMsg}
+                </div>
+              )}
+              <div style={{ color: "var(--muted)", fontSize: 12 }}>
+                Caja administra estos datos. La información del lote se conserva y no se modifica desde este formulario.
+              </div>
+            </div>
+          </Card>
+
+          <Card title={profileDraft ? `Ficha de socio · DNI ${profileDraft.dni}` : "Maestro de Socios"}>
+            {!profileDraft ? (
+              <div style={{ color: "var(--muted)", padding: 20, textAlign: "center" }}>
+                Buscá un DNI para abrir su ficha.
+              </div>
+            ) : (
+              <form onSubmit={saveMemberProfile} style={{ display: "grid", gap: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span className="badge" style={{ borderColor: profileExists ? "#22c55e" : "#f59e0b" }}>
+                    {profileExists ? "Ficha existente" : "Nueva ficha"}
+                  </span>
+                  <span className="badge" style={{ borderColor: profileDraftStatus === "COMPLETO" ? "#22c55e" : "#f59e0b" }}>
+                    {profileDraftStatus === "COMPLETO" ? "Completa" : "Incompleta"}
+                  </span>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <span style={{ fontWeight: 700 }}>Nombre *</span>
+                    <input className="input" value={profileDraft.firstName} onChange={(e) => setProfileDraft({ ...profileDraft, firstName: e.target.value })} />
+                  </label>
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <span style={{ fontWeight: 700 }}>Apellido *</span>
+                    <input className="input" value={profileDraft.lastName} onChange={(e) => setProfileDraft({ ...profileDraft, lastName: e.target.value })} />
+                  </label>
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <span style={{ fontWeight: 700 }}>Fecha de nacimiento</span>
+                    <input className="input" type="date" max={todayKey()} value={profileDraft.birthDate} onChange={(e) => setProfileDraft({ ...profileDraft, birthDate: e.target.value })} />
+                  </label>
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <span style={{ fontWeight: 700 }}>Domicilio en San Isidro</span>
+                    <select className="input" value={profileDraft.residencyStatus} onChange={(e) => setProfileDraft({ ...profileDraft, residencyStatus: e.target.value as MemberProfile["residencyStatus"] })}>
+                      <option value="SIN_VERIFICAR">Sin verificar</option>
+                      <option value="SAN_ISIDRO">Sí</option>
+                      <option value="FUERA_SAN_ISIDRO">No</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div>
+                  <div style={{ fontWeight: 800, marginBottom: 8 }}>Domicilio</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "2fr .7fr 1.3fr", gap: 12 }}>
+                    <label style={{ display: "grid", gap: 6 }}>
+                      <span>Calle</span>
+                      <input className="input" value={profileDraft.address.street} onChange={(e) => setProfileDraft({ ...profileDraft, address: { ...profileDraft.address, street: e.target.value } })} />
+                    </label>
+                    <label style={{ display: "grid", gap: 6 }}>
+                      <span>Número</span>
+                      <input className="input" value={profileDraft.address.number} onChange={(e) => setProfileDraft({ ...profileDraft, address: { ...profileDraft.address, number: e.target.value } })} />
+                    </label>
+                    <label style={{ display: "grid", gap: 6 }}>
+                      <span>Localidad</span>
+                      <input className="input" value={profileDraft.address.locality} onChange={(e) => setProfileDraft({ ...profileDraft, address: { ...profileDraft.address, locality: e.target.value } })} />
+                    </label>
+                  </div>
+                </div>
+
+                <div style={{ padding: 10, borderRadius: 10, background: profileDraft.residencyStatus === "FUERA_SAN_ISIDRO" ? "rgba(245,158,11,.12)" : "rgba(79,140,255,.10)" }}>
+                  {profileDraft.residencyStatus === "FUERA_SAN_ISIDRO"
+                    ? "Domicilio fuera de San Isidro. Este dato quedará preparado para la futura regla de recargo."
+                    : residencyLabel(profileDraft.residencyStatus)}
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                  <button className="button" type="submit" disabled={profileSaving}>
+                    {profileSaving ? "Guardando..." : "Guardar ficha"}
+                  </button>
+                </div>
+              </form>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {hasPendingAlert && memberAlert && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="member-alert-title"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 130,
+            display: "grid",
+            placeItems: "center",
+            padding: 20,
+            background: "rgba(3, 8, 20, 0.82)",
+          }}
+        >
+          <div className="panel" style={{ width: "min(620px, 100%)", border: `2px solid ${memberAlert.level === "IMPORTANTE" ? "#f59e0b" : "#3b82f6"}`, boxShadow: "0 24px 90px rgba(0,0,0,.55)" }}>
+            <div style={{ fontSize: 42, textAlign: "center" }}>{memberAlert.level === "IMPORTANTE" ? "⚠️" : "ℹ️"}</div>
+            <h2 id="member-alert-title" style={{ textAlign: "center", margin: "4px 0 12px" }}>
+              Alerta de Gabinete Social
+            </h2>
+            <div style={{ textAlign: "center", color: "var(--muted)", marginBottom: 16 }}>
+              {memberProfile?.firstName || memberProfile?.lastName
+                ? `${memberProfile.lastName}, ${memberProfile.firstName} · `
+                : ""}
+              DNI {memberId}
+            </div>
+            <div style={{ padding: 18, borderRadius: 12, background: memberAlert.level === "IMPORTANTE" ? "rgba(245,158,11,.14)" : "rgba(59,130,246,.14)", fontSize: 18, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+              {memberAlert.message}
+            </div>
+            {memberAlert.validUntil && (
+              <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 12, marginTop: 10 }}>
+                Vigente hasta {memberAlert.validUntil}
+              </div>
+            )}
+            <button className="button" style={{ width: "100%", marginTop: 18, padding: 14, fontSize: 16 }} onClick={acknowledgeMemberAlert} autoFocus>
+              Entendido, continuar
+            </button>
+          </div>
         </div>
       )}
 
