@@ -408,7 +408,7 @@ export default function Gabinete() {
       setAlertMessage(data.message ?? "");
       setAlertLevel(data.level === "IMPORTANTE" ? "IMPORTANTE" : "INFO");
       setAlertValidUntil(data.validUntil ?? "");
-      const isActive = isMemberAlertActive({ dni, ...data }, toDateInputValue(new Date()));
+      const isActive = isMemberAlertActive(data, toDateInputValue(new Date()));
       setAlertMsg({
         text: isActive
           ? "Alerta activa encontrada."

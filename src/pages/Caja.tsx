@@ -11,7 +11,7 @@ import {
 } from "../lib/sales";
 import type { PaymentMethod } from "../lib/sales";
 import { Card } from "../ui/Card";
-import { doc, onSnapshot, collection, query, orderBy, where, getDoc, setDoc, serverTimestamp, writeBatch } from "firebase/firestore";
+import { doc, onSnapshot, collection, query, orderBy, where, getDoc, serverTimestamp, writeBatch } from "firebase/firestore";
 import { db } from "../firebase";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { resolveMemberDni } from "../lib/memberId";

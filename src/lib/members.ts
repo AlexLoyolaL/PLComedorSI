@@ -74,7 +74,7 @@ export function memberProfileFromData(dni: string, data?: any): MemberProfile {
   };
 }
 
-export function isMemberAlertActive(alert: MemberAlert | null, dateKey: string): alert is MemberAlert {
+export function isMemberAlertActive(alert: MemberAlert | null, dateKey: string): boolean {
   return Boolean(alert?.active && (!alert.validUntil || alert.validUntil >= dateKey));
 }
 
