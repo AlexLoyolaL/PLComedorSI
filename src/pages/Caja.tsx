@@ -11,11 +11,11 @@ import {
 } from "../lib/sales";
 import type { PaymentMethod } from "../lib/sales";
 import { Card } from "../ui/Card";
-import { doc, onSnapshot, collection, query, orderBy, where, getDoc, serverTimestamp, writeBatch } from "firebase/firestore";
+import { doc, onSnapshot, collection, query, orderBy, where, getDoc } from "firebase/firestore";
 import { db } from "../firebase";
 import { getFunctions, httpsCallable } from "firebase/functions";
 import { resolveMemberDni } from "../lib/memberId";
-import { emptyMemberProfile, isMemberAlertActive, memberProfileFromData, residencyLabel } from "../lib/members";
+import { isMemberAlertActive, memberProfileFromData, residencyLabel } from "../lib/members";
 import type { MemberAlert, MemberProfile } from "../lib/members";
 
 type Row = {
@@ -56,10 +56,9 @@ function hasEnter(s: string) {
 }
 
 export default function Caja() {
-  const { user, role } = useAuth();
+  const { user } = useAuth();
 
-  const [activeTab, setActiveTab] = useState<"caja_rapida" | "venta_lotes" | "maestro_socios">("caja_rapida");
-  const canEditMemberProfiles = role === "root" || role === "administrador" || role === "administrativo";
+  const [activeTab, setActiveTab] = useState<"caja_rapida" | "venta_lotes">("caja_rapida");
 
   const [memberInput, setMemberInput] = useState("");
   const [orderInput, setOrderInput] = useState("");
@@ -117,16 +116,10 @@ export default function Caja() {
   const [generatedLink, setGeneratedLink] = useState("");
   const [bundleSales, setBundleSales] = useState<any[]>([]);
 
-  // Maestro de socios administrado por Caja
-  const [profileSearchInput, setProfileSearchInput] = useState("");
-  const [profileDraft, setProfileDraft] = useState<MemberProfile | null>(null);
-  const [profileExists, setProfileExists] = useState(false);
-  const [profileSaving, setProfileSaving] = useState(false);
-  const [profileMsg, setProfileMsg] = useState("");
-
-  // Nombre y apellido de los socios subsidiados (Gabinete Social), para
-  // mostrarlos junto al DNI en el listado de ventas en vez de solo el número.
-  const [subsidizedNames, setSubsidizedNames] = useState<Record<string, { name: string; lastName: string }>>({});
+  // Nombres de los socios visibles en Caja. Se consultan únicamente los DNI
+  // que aparecen en ventas o lotes, evitando leer el padrón completo.
+  const [memberNames, setMemberNames] = useState<Record<string, { name: string; lastName: string }>>({});
+  const requestedNameDnisRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const goOnline = () => setIsOnline(true); 
@@ -146,18 +139,6 @@ export default function Caja() {
   useEffect(() => {
     setMontoPagado(String(cantidadViandas * PRECIO_VIANDA_LOTE));
   }, [cantidadViandas]);
-
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, "subsidized_members"), (snap) => {
-      const map: Record<string, { name: string; lastName: string }> = {};
-      snap.forEach((d) => {
-        const data = d.data() as any;
-        map[d.id] = { name: data?.name ?? "", lastName: data?.lastName ?? "" };
-      });
-      setSubsidizedNames(map);
-    });
-    return () => unsub();
-  }, []);
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "adminAdds"), (snap) => {
@@ -197,6 +178,48 @@ export default function Caja() {
     });
     return () => unsub();
   }, []);
+
+  useEffect(() => {
+    const dnis = Array.from(new Set([
+      ...rows.map((row) => row.member?.id),
+      ...activeLotes.map((lote) => lote.dni),
+      ...bundleSales.map((sale) => String(sale.dni ?? "")),
+    ].filter((dni): dni is string => Boolean(dni))));
+    const pending = dnis.filter((dni) => !memberNames[dni] && !requestedNameDnisRef.current.has(dni));
+    if (!pending.length) return;
+
+    pending.forEach((dni) => requestedNameDnisRef.current.add(dni));
+
+    void Promise.all(pending.map(async (dni) => {
+      try {
+        const memberSnapshot = await getDoc(doc(db, "members", dni));
+        const memberData = memberSnapshot.data();
+        let name = String(memberData?.firstName ?? memberData?.name ?? "").trim();
+        let lastName = String(memberData?.lastName ?? "").trim();
+
+        if (!name && !lastName) {
+          const subsidizedSnapshot = await getDoc(doc(db, "subsidized_members", dni));
+          const subsidizedData = subsidizedSnapshot.data();
+          name = String(subsidizedData?.name ?? "").trim();
+          lastName = String(subsidizedData?.lastName ?? "").trim();
+        }
+
+        return name || lastName ? { dni, name, lastName } : null;
+      } catch (error) {
+        requestedNameDnisRef.current.delete(dni);
+        console.warn(`No se pudo consultar el nombre del socio ${dni}:`, error);
+        return null;
+      }
+    })).then((results) => {
+      const found = results.filter((result): result is { dni: string; name: string; lastName: string } => Boolean(result));
+      if (!found.length) return;
+      setMemberNames((current) => {
+        const next = { ...current };
+        found.forEach(({ dni, name, lastName }) => { next[dni] = { name, lastName }; });
+        return next;
+      });
+    });
+  }, [rows, activeLotes, bundleSales, memberNames]);
 
   // --- NUEVO: SENSOR EN TIEMPO REAL (Reemplaza el getDoc estático) ---
   useEffect(() => {
@@ -248,13 +271,10 @@ export default function Caja() {
   }, [memberId]);
 
   const hasPendingAlert = isMemberAlertActive(memberAlert, todayKey()) && !alertAcknowledged;
-  const profileDraftStatus = profileDraft
-    ? memberProfileFromData(profileDraft.dni, profileDraft).profileStatus
-    : null;
   const selectedMemberName = memberProfile?.firstName || memberProfile?.lastName
     ? `${memberProfile.lastName}, ${memberProfile.firstName}`
-    : memberId && subsidizedNames[memberId]
-      ? `${subsidizedNames[memberId].lastName}, ${subsidizedNames[memberId].name}`
+    : memberId && memberNames[memberId]
+      ? `${memberNames[memberId].lastName}, ${memberNames[memberId].name}`
       : "";
 
   // --- NUEVO: PLC AUTO-DISPARADOR (Evita la condición de carrera del escáner) ---
@@ -276,9 +296,15 @@ export default function Caja() {
     if (filterLote) base = base.filter((r) => r.paymentMethod === "LOTE_PREPAGO");
     if (filterTable) base = base.filter((r) => r.destination?.table === filterTable);
     const q = searchSocio.trim().toLowerCase();
-    if (q) base = base.filter((r) => (r.member?.id ?? "").toLowerCase().includes(q));
+    if (q) base = base.filter((r) => {
+      const dni = r.member?.id ?? "";
+      const memberName = memberNames[dni];
+      return dni.toLowerCase().includes(q)
+        || memberName?.name.toLowerCase().includes(q)
+        || memberName?.lastName.toLowerCase().includes(q);
+    });
     return base;
-  }, [rows, searchSocio, filterSubsidized, filterLote, filterTable]);
+  }, [rows, searchSocio, filterSubsidized, filterLote, filterTable, memberNames]);
 
   const viandaCounts = useMemo(() => rows.reduce((acc, r) => {
     if (!r.voided && !r.manual && (r.itemType === "MENU" || r.itemType === "VEGGIE" || r.itemType === "CELIACO")) {
@@ -466,100 +492,6 @@ export default function Caja() {
     }, 50);
   }
 
-  async function loadMemberProfile(rawIdentifier: string, switchTab = true) {
-    if (!rawIdentifier.trim()) return;
-    setProfileMsg("");
-    try {
-      const dni = await resolveMemberDni(rawIdentifier);
-      if (!dni) throw new Error("No se pudo resolver un DNI válido.");
-      const snap = await getDoc(doc(db, "members", dni));
-      setProfileExists(snap.exists());
-      let draft = snap.exists() ? memberProfileFromData(dni, snap.data()) : emptyMemberProfile(dni);
-      if (!draft.firstName || !draft.lastName) {
-        const subsidizedSnap = await getDoc(doc(db, "subsidized_members", dni));
-        const subsidized = subsidizedSnap.data();
-        if (subsidizedSnap.exists()) {
-          draft = memberProfileFromData(dni, {
-            ...draft,
-            firstName: draft.firstName || subsidized?.name,
-            lastName: draft.lastName || subsidized?.lastName,
-          });
-        }
-      }
-      setProfileDraft(draft);
-      setProfileSearchInput("");
-      setProfileMsg(snap.exists() ? "Ficha cargada." : "El socio todavía no tiene ficha. Completá sus datos para crearla.");
-      if (switchTab) setActiveTab("maestro_socios");
-    } catch (e: any) {
-      setProfileMsg(e?.message || String(e));
-    }
-  }
-
-  async function saveMemberProfile(e: React.FormEvent) {
-    e.preventDefault();
-    if (!user || !profileDraft || !canEditMemberProfiles) return;
-
-    const normalized = memberProfileFromData(profileDraft.dni, profileDraft);
-    if (!normalized.firstName.trim() || !normalized.lastName.trim()) {
-      setProfileMsg("Nombre y apellido son obligatorios.");
-      return;
-    }
-
-    setProfileSaving(true);
-    setProfileMsg("");
-    try {
-      const memberRef = doc(db, "members", normalized.dni);
-      const subsidizedRef = doc(db, "subsidized_members", normalized.dni);
-      const [current, subsidized] = await Promise.all([
-        getDoc(memberRef),
-        getDoc(subsidizedRef),
-      ]);
-      const actor = { uid: user.uid, email: user.email ?? "", name: user.displayName ?? "" };
-      const payload: any = {
-        id: normalized.dni,
-        dni: normalized.dni,
-        firstName: normalized.firstName.trim().toUpperCase(),
-        name: normalized.firstName.trim().toUpperCase(),
-        lastName: normalized.lastName.trim().toUpperCase(),
-        birthDate: normalized.birthDate,
-        address: {
-          street: normalized.address.street.trim().toUpperCase(),
-          number: normalized.address.number.trim().toUpperCase(),
-          locality: normalized.address.locality.trim().toUpperCase(),
-        },
-        residencyStatus: normalized.residencyStatus,
-        profileStatus: normalized.profileStatus,
-        updatedAt: serverTimestamp(),
-        updatedBy: actor,
-      };
-      if (!current.exists()) {
-        payload.createdAt = serverTimestamp();
-        payload.createdBy = actor;
-        payload.active = true;
-      }
-      const batch = writeBatch(db);
-      batch.set(memberRef, payload, { merge: true });
-      if (subsidized.exists()) {
-        // Si además es subvencionado, mantenemos compatible el padrón legado
-        // para que ambas pantallas muestren siempre el mismo nombre.
-        batch.set(subsidizedRef, {
-          name: payload.firstName,
-          lastName: payload.lastName,
-        }, { merge: true });
-      }
-      await batch.commit();
-      const savedProfile = memberProfileFromData(normalized.dni, payload);
-      setProfileDraft(savedProfile);
-      setProfileExists(true);
-      if (memberId === normalized.dni) setMemberProfile(savedProfile);
-      setProfileMsg(`✅ Ficha guardada como ${savedProfile.profileStatus.toLowerCase()}.`);
-    } catch (e: any) {
-      setProfileMsg("Error al guardar la ficha: " + (e?.message || String(e)));
-    } finally {
-      setProfileSaving(false);
-    }
-  }
-
   useEffect(() => { 
     function onKey(e: KeyboardEvent) { if (dupInfo.needed && e.key === "F2") { e.preventDefault(); confirmIfReady(true); } } 
     window.addEventListener("keydown", onKey); 
@@ -651,11 +583,6 @@ export default function Caja() {
         <button onClick={() => setActiveTab("venta_lotes")} style={{ padding: "8px 16px", fontWeight: "bold", borderRadius: "4px 4px 0 0", background: activeTab === "venta_lotes" ? "#10b981" : "transparent", color: activeTab === "venta_lotes" ? "#fff" : "#4a5568", border: "none", cursor: "pointer" }}>
           📅 Vender Lote Mensual (Mercado Pago)
         </button>
-        {canEditMemberProfiles && (
-          <button onClick={() => setActiveTab("maestro_socios")} style={{ padding: "8px 16px", fontWeight: "bold", borderRadius: "4px 4px 0 0", background: activeTab === "maestro_socios" ? "#8b5cf6" : "transparent", color: activeTab === "maestro_socios" ? "#fff" : "#4a5568", border: "none", cursor: "pointer" }}>
-            👤 Maestro de Socios
-          </button>
-        )}
       </div>
 
       {activeTab === "caja_rapida" ? (
@@ -683,11 +610,6 @@ export default function Caja() {
                   )}
                   {isSubsidized && ( <span style={{ background: '#3b82f6', color: '#fff', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 'bold' }}>🎁 SUBVENCIONADO</span> )}
                   {memberBundleRemaining !== null && ( <span style={{ background: '#10b981', color: '#fff', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 'bold' }}>🎟️ LOTE ACTIVO: {memberBundleRemaining} viandas</span> )}
-                  {memberId && canEditMemberProfiles && (
-                    <button className="button ghost" style={{ padding: "5px 10px" }} onClick={() => loadMemberProfile(memberId)}>
-                      {memberProfile ? "Editar ficha" : "Completar ficha"}
-                    </button>
-                  )}
                 </div>
                 {memberBundleRemaining !== null && memberBundleRemaining <= 3 && ( <div style={{ background: "rgba(239, 68, 68, 0.15)", border: "1px solid #ef4444", color: "#b91c1c", padding: 10, borderRadius: 6, fontWeight: "bold", marginTop: 8 }}>⚠️ ¡ATENCIÓN! Al socio le quedan solo {memberBundleRemaining} viandas en su lote. ¡Avisarle para renovar!</div> )}
               </div>
@@ -741,9 +663,9 @@ export default function Caja() {
                       <tr key={r.id} style={{ opacity: r.voided ? 0.5 : 1 }}>
                         <td>{r.ts?.toDate ? r.ts.toDate().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ""}</td>
                         <td>
-                          {r.isSubsidized && subsidizedNames[r.member?.id]?.name ? (
+                          {memberNames[r.member?.id]?.name || memberNames[r.member?.id]?.lastName ? (
                             <>
-                              {subsidizedNames[r.member.id].lastName}, {subsidizedNames[r.member.id].name}
+                              {memberNames[r.member.id].lastName}, {memberNames[r.member.id].name}
                               <div style={{ fontSize: 11, color: "var(--muted)" }}>{r.member?.id}</div>
                             </>
                           ) : (
@@ -765,7 +687,7 @@ export default function Caja() {
             </Card>
           </div>
         </div>
-      ) : activeTab === "venta_lotes" ? (
+      ) : (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
           
           <Card title="Generar Link de Pago para Lote Mensual">
@@ -834,7 +756,11 @@ export default function Caja() {
                   {bundleSales.map((b, i) => (
                     <tr key={i} style={{ background: "rgba(16, 185, 129, 0.05)" }}>
                       <td>{b.fecha?.toDate ? b.fecha.toDate().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : "-"}</td>
-                      <td style={{ fontWeight: "bold" }}>{b.dni}</td>
+                      <td style={{ fontWeight: "bold" }}>
+                        {memberNames[String(b.dni)]?.name || memberNames[String(b.dni)]?.lastName
+                          ? `${memberNames[String(b.dni)].lastName}, ${memberNames[String(b.dni)].name} (${b.dni})`
+                          : b.dni}
+                      </td>
                       <td>{b.cantidad}</td>
                       <td className="num">${b.monto}</td>
                     </tr>
@@ -864,7 +790,7 @@ export default function Caja() {
                     {activeLotes.map((l) => (
                       <tr key={l.dni} style={{ background: l.remaining <= 3 ? "rgba(239, 68, 68, 0.08)" : undefined }}>
                         <td style={{ fontWeight: "bold" }}>
-                          {subsidizedNames[l.dni]?.name ? `${subsidizedNames[l.dni].lastName}, ${subsidizedNames[l.dni].name} (${l.dni})` : l.dni}
+                          {memberNames[l.dni]?.name || memberNames[l.dni]?.lastName ? `${memberNames[l.dni].lastName}, ${memberNames[l.dni].name} (${l.dni})` : l.dni}
                         </td>
                         <td>
                           {l.remaining}
@@ -882,109 +808,6 @@ export default function Caja() {
             </Card>
           </div>
 
-        </div>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, .8fr) 2fr", gap: 16, alignItems: "start" }}>
-          <Card title="Buscar socio">
-            <div style={{ display: "grid", gap: 12 }}>
-              <p style={{ margin: 0, color: "var(--muted)" }}>
-                Escaneá un carnet o ingresá el DNI para crear o actualizar su ficha maestra.
-              </p>
-              <input
-                className="input"
-                placeholder="DNI sin puntos o código del carnet"
-                value={profileSearchInput}
-                onChange={(e) => setProfileSearchInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && loadMemberProfile(profileSearchInput, false)}
-              />
-              <button className="button" onClick={() => loadMemberProfile(profileSearchInput, false)}>Buscar</button>
-              {memberId && (
-                <button className="button outline" onClick={() => loadMemberProfile(memberId, false)}>
-                  Cargar socio actual: {memberId}
-                </button>
-              )}
-              {profileMsg && (
-                <div style={{ color: profileMsg.startsWith("✅") ? "var(--ok)" : "var(--muted)", fontSize: 13 }}>
-                  {profileMsg}
-                </div>
-              )}
-              <div style={{ color: "var(--muted)", fontSize: 12 }}>
-                Caja administra estos datos. La información del lote se conserva y no se modifica desde este formulario.
-              </div>
-            </div>
-          </Card>
-
-          <Card title={profileDraft ? `Ficha de socio · DNI ${profileDraft.dni}` : "Maestro de Socios"}>
-            {!profileDraft ? (
-              <div style={{ color: "var(--muted)", padding: 20, textAlign: "center" }}>
-                Buscá un DNI para abrir su ficha.
-              </div>
-            ) : (
-              <form onSubmit={saveMemberProfile} style={{ display: "grid", gap: 16 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span className="badge" style={{ borderColor: profileExists ? "#22c55e" : "#f59e0b" }}>
-                    {profileExists ? "Ficha existente" : "Nueva ficha"}
-                  </span>
-                  <span className="badge" style={{ borderColor: profileDraftStatus === "COMPLETO" ? "#22c55e" : "#f59e0b" }}>
-                    {profileDraftStatus === "COMPLETO" ? "Completa" : "Incompleta"}
-                  </span>
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
-                  <label style={{ display: "grid", gap: 6 }}>
-                    <span style={{ fontWeight: 700 }}>Nombre *</span>
-                    <input className="input" value={profileDraft.firstName} onChange={(e) => setProfileDraft({ ...profileDraft, firstName: e.target.value })} />
-                  </label>
-                  <label style={{ display: "grid", gap: 6 }}>
-                    <span style={{ fontWeight: 700 }}>Apellido *</span>
-                    <input className="input" value={profileDraft.lastName} onChange={(e) => setProfileDraft({ ...profileDraft, lastName: e.target.value })} />
-                  </label>
-                  <label style={{ display: "grid", gap: 6 }}>
-                    <span style={{ fontWeight: 700 }}>Fecha de nacimiento</span>
-                    <input className="input" type="date" max={todayKey()} value={profileDraft.birthDate} onChange={(e) => setProfileDraft({ ...profileDraft, birthDate: e.target.value })} />
-                  </label>
-                  <label style={{ display: "grid", gap: 6 }}>
-                    <span style={{ fontWeight: 700 }}>Domicilio en San Isidro</span>
-                    <select className="input" value={profileDraft.residencyStatus} onChange={(e) => setProfileDraft({ ...profileDraft, residencyStatus: e.target.value as MemberProfile["residencyStatus"] })}>
-                      <option value="SIN_VERIFICAR">Sin verificar</option>
-                      <option value="SAN_ISIDRO">Sí</option>
-                      <option value="FUERA_SAN_ISIDRO">No</option>
-                    </select>
-                  </label>
-                </div>
-
-                <div>
-                  <div style={{ fontWeight: 800, marginBottom: 8 }}>Domicilio</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "2fr .7fr 1.3fr", gap: 12 }}>
-                    <label style={{ display: "grid", gap: 6 }}>
-                      <span>Calle</span>
-                      <input className="input" value={profileDraft.address.street} onChange={(e) => setProfileDraft({ ...profileDraft, address: { ...profileDraft.address, street: e.target.value } })} />
-                    </label>
-                    <label style={{ display: "grid", gap: 6 }}>
-                      <span>Número</span>
-                      <input className="input" value={profileDraft.address.number} onChange={(e) => setProfileDraft({ ...profileDraft, address: { ...profileDraft.address, number: e.target.value } })} />
-                    </label>
-                    <label style={{ display: "grid", gap: 6 }}>
-                      <span>Localidad</span>
-                      <input className="input" value={profileDraft.address.locality} onChange={(e) => setProfileDraft({ ...profileDraft, address: { ...profileDraft.address, locality: e.target.value } })} />
-                    </label>
-                  </div>
-                </div>
-
-                <div style={{ padding: 10, borderRadius: 10, background: profileDraft.residencyStatus === "FUERA_SAN_ISIDRO" ? "rgba(245,158,11,.12)" : "rgba(79,140,255,.10)" }}>
-                  {profileDraft.residencyStatus === "FUERA_SAN_ISIDRO"
-                    ? "Domicilio fuera de San Isidro. Este dato quedará preparado para la futura regla de recargo."
-                    : residencyLabel(profileDraft.residencyStatus)}
-                </div>
-
-                <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                  <button className="button" type="submit" disabled={profileSaving}>
-                    {profileSaving ? "Guardando..." : "Guardar ficha"}
-                  </button>
-                </div>
-              </form>
-            )}
-          </Card>
         </div>
       )}
 

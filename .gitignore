@@ -10,6 +10,7 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.firebase/
 *.local
 
 # Editor directories and files
@@ -28,3 +29,5 @@ dist-ssr
 
 # Informes/reportes en Word (uso interno, no van a GitHub)
 *.docx
+*.png
+*.xlsx

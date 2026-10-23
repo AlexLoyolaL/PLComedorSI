@@ -3,12 +3,12 @@ import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "../firebase";
 import { parseMemberQR } from "./parsers";
 
-const PURE_DNI_RE = /^\d{7,9}$/;
+const PURE_DNI_RE = /^\d{7,8}$/;
 
 /**
  * Resuelve el texto crudo de un QR/carnet escaneado al DNI canónico del socio.
  *
- * - Si lo escaneado ya es un DNI puro (7 a 9 dígitos), se devuelve tal cual.
+ * - Si lo escaneado ya es un DNI puro (7 u 8 dígitos), se devuelve tal cual.
  * - Si no lo es (carnets con un código interno, formato distinto, etc.), se
  *   busca una traducción ya guardada en la colección `qr_mappings`.
  * - Si tampoco existe esa traducción, se le pide al usuario que tipee el DNI
@@ -59,7 +59,8 @@ export async function resolveMemberDni(scannedText: string): Promise<string | nu
   }
 
   if (mappingSnap.exists()) {
-    return mappingSnap.data().dni as string;
+    const mappedDni = String(mappingSnap.data().dni ?? "").trim();
+    return PURE_DNI_RE.test(mappedDni) ? mappedDni : null;
   }
 
   const nuevoDni = window.prompt(

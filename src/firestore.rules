@@ -34,6 +34,9 @@ service cloud.firestore {
     function isGabineteStaff() {
       return signedIn() && getRoles().gabinete[request.auth.uid] == true;
     }
+    function isStaff() {
+      return signedIn() && (isAdministrativo() || isCocina() || isVisor());
+    }
 
     // ========= COLECCIONES =========
 
@@ -77,12 +80,8 @@ service cloud.firestore {
 
     // --- EL PADRÓN DEL GABINETE SOCIAL ---
     match /subsidized_members/{id} {
-      allow read: if isAdministrativo() || isVisor();
-
-      // Root y Gabinete pueden crear (dar altas) y borrar (quitar beneficio)
+      allow read: if isStaff();
       allow create, delete: if isRoot() || isGabinete();
-
-      // Administrativos NECESITAN poder actualizar (update) para sumar el +1 a las viandas retiradas
       allow update: if isAdministrativo() || isRoot() || isGabinete();
     }
 
@@ -90,12 +89,13 @@ service cloud.firestore {
     match /member_alerts/{dni} {
       // Caja necesita leer la alerta puntual del socio. Gabinete también
       // lista las alertas activas desde su módulo.
-      allow read: if isAdministrativo() || isVisor();
+      allow read: if isStaff();
 
       // Solo Gabinete Social y Root administran su contenido. "Eliminar"
       // en la interfaz es una baja lógica (active=false) para conservar trazabilidad.
       allow create, update: if isRoot() || isGabineteStaff();
-      allow delete: if false;
+      // La eliminación física solo se usa al borrar por completo un socio inválido.
+      allow delete: if isRoot();
     }
 
     // --- AUDITORÍA DE RENDICIONES (PDFs y Balances) ---
@@ -112,7 +112,7 @@ service cloud.firestore {
     // cajeros (al resolver un carnet viejo en una venta) y Gabinete Social
     // (al dar de alta o reparar carnets viejos).
     match /qr_mappings/{document} {
-      allow read: if isAdministrativo() || isVisor();
+      allow read: if isStaff();
       allow write: if isAdministrativo() || isGabinete();
     }
 
@@ -127,24 +127,31 @@ service cloud.firestore {
     }
 
     match /members/{id} {
-      // Los cajeros y visores necesitan ver cuántas viandas le quedan al socio
-      allow read: if isAdministrativo() || isVisor();
+      // Todos los perfiles habilitados pueden consultar el padrón central.
+      allow read: if isStaff();
 
-      // Caja administra la ficha completa y también descuenta lotes.
+      // Caja, administrativos y administradores pueden mantener la ficha completa.
       allow create, update: if isAdministrativo();
 
       // Gabinete mantiene únicamente nombre y apellido en la ficha maestra.
-      // No puede alterar domicilio, residencia, saldos ni lotes prepagos.
       allow create: if isGabineteStaff()
         && request.resource.data.keys().hasOnly([
           'id', 'dni', 'firstName', 'name', 'lastName', 'updatedAt', 'updatedBy'
         ]);
       allow update: if isGabineteStaff()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'firstName', 'name', 'lastName', 'updatedAt', 'updatedBy'
+          'id', 'dni', 'firstName', 'name', 'lastName', 'updatedAt', 'updatedBy'
         ]);
 
-      allow delete: if false;
+      // La eliminación física sigue reservada a ROOT por ser destructiva.
+      allow delete: if isRoot();
+    }
+
+    // --- Historial inmutable de ediciones y eliminaciones de socios ---
+    match /member_audit/{id} {
+      allow read: if isStaff();
+      allow create: if isAdministrativo();
+      allow update, delete: if false;
     }
 
     // Cerrar cualquier otra colección por defecto
@@ -153,4 +160,3 @@ service cloud.firestore {
     }
   }
 }
- 

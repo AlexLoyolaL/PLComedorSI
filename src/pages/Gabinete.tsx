@@ -29,7 +29,7 @@ import {
   CartesianGrid,
 } from "recharts";
 
-const PURE_DNI_RE = /^\d{7,9}$/;
+const PURE_DNI_RE = /^\d{7,8}$/;
 
 type SubsidizedMember = {
   id: string; 
@@ -195,7 +195,7 @@ export default function Gabinete() {
 
   // Carnets viejos: el "id" del documento no es un DNI puro, sino el texto
   // crudo que se escaneó en su momento (a veces con nombre, teléfono, etc.
-  // adelante). Detectamos el DNI como los primeros 7 a 9 dígitos del código.
+  // adelante). Detectamos un DNI de 7 u 8 dígitos al inicio del código.
   const brokenMembers = useMemo(
     () => members.filter((m) => !PURE_DNI_RE.test(m.id)),
     [members]
@@ -227,7 +227,7 @@ export default function Gabinete() {
   const handleManualDni = () => {
     const value = manualDni.trim();
     if (!PURE_DNI_RE.test(value)) {
-      setMsg({ text: "Ingresá un DNI válido (7 a 9 dígitos, sin puntos).", type: "error" });
+      setMsg({ text: "Ingresá un DNI válido (7 u 8 dígitos, sin puntos).", type: "error" });
       return;
     }
     setMemberId(value);
@@ -299,7 +299,7 @@ export default function Gabinete() {
   // el carnet físico se reconozca solo la próxima vez, y borra el registro
   // viejo. No se pierde ningún dato en el proceso.
   const repairBrokenMember = async (m: SubsidizedMember): Promise<string> => {
-    const match = m.id.match(/^(\d{7,9})/);
+    const match = m.id.match(/^(\d{7,8})(?!\d)/);
     if (!match) {
       return "⚠️ No se pudo detectar un DNI al inicio del código. Revisar a mano.";
     }
@@ -549,9 +549,10 @@ export default function Gabinete() {
                   <div style={{ display: "flex", gap: 8 }}>
                     <input
                       className="input"
+                      inputMode="numeric"
                       placeholder="Solo números, sin puntos"
                       value={manualDni}
-                      onChange={(e) => setManualDni(e.target.value)}
+                      onChange={(e) => setManualDni(e.target.value.replace(/\D/g, "").slice(0, 8))}
                       onKeyDown={(e) => e.key === "Enter" && handleManualDni()}
                     />
                     <button className="button outline" onClick={handleManualDni}>Usar DNI</button>
@@ -610,7 +611,7 @@ export default function Gabinete() {
 
                   <div style={{ maxHeight: 160, overflow: "auto", fontSize: 12 }}>
                     {brokenMembers.map((m) => {
-                      const match = m.id.match(/^(\d{7,9})/);
+                      const match = m.id.match(/^(\d{7,8})(?!\d)/);
                       return (
                         <div key={m.id} style={{ padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
                           <b>{m.lastName}, {m.name}</b> — DNI detectado: {match ? match[1] : "❓ no detectado"}

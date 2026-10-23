@@ -10,8 +10,9 @@ import Gabinete from "./pages/Gabinete";
 import AdminRolesPage from "./pages/AdminRoles";
 import AuditoriaRendicionPage from "./pages/AuditoriaRendicion";
 import ListadoQRPage from "./pages/ListadoQR";
+import SociosPage from "./pages/Socios";
 
-type Tab = "caja" | "cocina" | "super" | "admin" | "rendicion" | "gabinete" | "adminRoles" | "auditoria" | "listadoQR";
+type Tab = "caja" | "cocina" | "super" | "admin" | "rendicion" | "gabinete" | "adminRoles" | "auditoria" | "listadoQR" | "socios";
 
 export default function App() {
   const { user, role, loading, logout } = useAuth();
@@ -159,6 +160,11 @@ export default function App() {
           </button>
         )}
 
+        {/* Padrón unificado disponible para todos los perfiles habilitados. */}
+        <button className={`tab ${tab === "socios" ? "active" : ""}`} onClick={() => setTab("socios")}>
+          👥 Socios
+        </button>
+
         <div className="fill" />
         <span className="badge">{user.email}</span>
         <button className="button ghost" onClick={logout}>
@@ -176,6 +182,7 @@ export default function App() {
         {tab === "adminRoles" && isRoot && <AdminRolesPage />}
         {tab === "auditoria" && (isRoot || isAdmin || isVisor) && <AuditoriaRendicionPage />}
         {tab === "listadoQR" && isRoot && <ListadoQRPage />}
+        {tab === "socios" && <SociosPage />}
       </div>
     </div>
   );
