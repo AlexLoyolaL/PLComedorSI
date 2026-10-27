@@ -44,6 +44,16 @@ type SaleEditForm = {
   paymentMethod: PaymentMethod;
 };
 
+type MemberRecordStatus = "IDLE" | "LOADING" | "REGISTERED" | "NOT_REGISTERED" | "ERROR";
+
+type CheckoutAlert = {
+  key: string;
+  title: string;
+  message: string;
+  level: "INFO" | "IMPORTANTE";
+  validUntil?: string | null;
+};
+
 const PAYMENT_LABELS: Record<PaymentMethod, string> = {
   EFECTIVO: "Efectivo",
   MP: "Mercado Pago",
@@ -74,7 +84,9 @@ export default function Caja() {
   const [memberBundleRemaining, setMemberBundleRemaining] = useState<number | null>(null); 
   const [memberProfile, setMemberProfile] = useState<MemberProfile | null>(null);
   const [memberAlert, setMemberAlert] = useState<MemberAlert | null>(null);
-  const [alertAcknowledged, setAlertAcknowledged] = useState(false);
+  const [memberRecordStatus, setMemberRecordStatus] = useState<MemberRecordStatus>("IDLE");
+  const [memberAlertStatus, setMemberAlertStatus] = useState<"IDLE" | "LOADING" | "READY">("IDLE");
+  const [acknowledgedAlertKeys, setAcknowledgedAlertKeys] = useState<string[]>([]);
   const memberLookupRef = useRef(0);
 
   const [isLoading, setIsLoading] = useState(false);
@@ -227,12 +239,16 @@ export default function Caja() {
       setMemberBundleRemaining(null);
       setMemberProfile(null);
       setMemberAlert(null);
-      setAlertAcknowledged(false);
+      setMemberRecordStatus("IDLE");
+      setMemberAlertStatus("IDLE");
+      setAcknowledgedAlertKeys([]);
       setIsSubsidized(false);
       return;
     }
 
-    setAlertAcknowledged(false);
+    setMemberRecordStatus("LOADING");
+    setMemberAlertStatus("LOADING");
+    setAcknowledgedAlertKeys([]);
 
     const unsubSub = onSnapshot(doc(db, "subsidized_members", memberId), (snap) => {
       setIsSubsidized(snap.exists() && snap.data()?.active === true);
@@ -242,6 +258,7 @@ export default function Caja() {
       if (snap.exists()) {
         const data = snap.data();
         setMemberProfile(memberProfileFromData(memberId, data));
+        setMemberRecordStatus("REGISTERED");
         const bundle = data?.active_bundle;
         const now = new Date(); 
         const expires = bundle?.expiresAt?.toDate ? bundle.expiresAt.toDate() : null;
@@ -253,7 +270,13 @@ export default function Caja() {
       } else {
         setMemberBundleRemaining(null);
         setMemberProfile(null);
+        setMemberRecordStatus("NOT_REGISTERED");
       }
+    }, (error) => {
+      console.warn("No se pudo verificar la ficha del socio:", error);
+      setMemberBundleRemaining(null);
+      setMemberProfile(null);
+      setMemberRecordStatus("ERROR");
     });
 
     const unsubAlert = onSnapshot(
@@ -261,21 +284,83 @@ export default function Caja() {
       (snap) => {
         const alert = snap.exists() ? ({ dni: memberId, ...snap.data() } as MemberAlert) : null;
         setMemberAlert(isMemberAlertActive(alert, todayKey()) ? alert : null);
+        setMemberAlertStatus("READY");
       },
       (error) => {
         console.warn("No se pudo actualizar la alerta del socio:", error);
+        setMemberAlert(null);
+        setMemberAlertStatus("READY");
       }
     );
 
     return () => { unsubSub(); unsubMember(); unsubAlert(); };
   }, [memberId]);
 
-  const hasPendingAlert = isMemberAlertActive(memberAlert, todayKey()) && !alertAcknowledged;
+  const checkoutAlerts = useMemo<CheckoutAlert[]>(() => {
+    const alerts: CheckoutAlert[] = [];
+
+    if (isMemberAlertActive(memberAlert, todayKey())) {
+      alerts.push({
+        key: "GABINETE",
+        title: "Alerta de Gabinete Social",
+        message: memberAlert!.message,
+        level: memberAlert!.level,
+        validUntil: memberAlert!.validUntil,
+      });
+    }
+
+    if (memberRecordStatus === "NOT_REGISTERED") {
+      alerts.push({
+        key: "NO_REGISTRADO",
+        title: "Socio no registrado",
+        message: "Verificar si firmó el acuerdo de convivencia.",
+        level: "IMPORTANTE",
+      });
+    } else if (memberRecordStatus === "REGISTERED" && memberProfile?.residencyStatus === "FUERA_SAN_ISIDRO") {
+      alerts.push({
+        key: "RESIDENCIA_FUERA",
+        title: "Verificación de residencia",
+        message: "La residencia del socio figura como Fuera de San Isidro. Verificá el dato antes de continuar.",
+        level: "IMPORTANTE",
+      });
+    } else if (memberRecordStatus === "REGISTERED" && memberProfile?.residencyStatus === "SIN_VERIFICAR") {
+      alerts.push({
+        key: "RESIDENCIA_SIN_VERIFICAR",
+        title: "Verificación de residencia",
+        message: "La residencia del socio figura como Sin verificar. Verificá el domicilio antes de continuar.",
+        level: "IMPORTANTE",
+      });
+    } else if (memberRecordStatus === "ERROR") {
+      alerts.push({
+        key: "VERIFICACION_ERROR",
+        title: "No se pudo verificar al socio",
+        message: "No se pudo comprobar si el socio está registrado. Revisá la conexión y verificá sus datos antes de continuar.",
+        level: "IMPORTANTE",
+      });
+    }
+
+    return alerts;
+  }, [memberAlert, memberProfile, memberRecordStatus]);
+
+  const currentCheckoutAlert = checkoutAlerts.find((alert) => !acknowledgedAlertKeys.includes(alert.key)) ?? null;
+  const memberChecksReady = memberRecordStatus !== "IDLE"
+    && memberRecordStatus !== "LOADING"
+    && memberAlertStatus === "READY";
+  const hasPendingAlert = Boolean(memberId) && (!memberChecksReady || Boolean(currentCheckoutAlert));
   const selectedMemberName = memberProfile?.firstName || memberProfile?.lastName
     ? `${memberProfile.lastName}, ${memberProfile.firstName}`
     : memberId && memberNames[memberId]
       ? `${memberNames[memberId].lastName}, ${memberNames[memberId].name}`
       : "";
+
+  useEffect(() => {
+    if (!memberId || !memberChecksReady || currentCheckoutAlert) return;
+    const focusTimer = window.setTimeout(() => {
+      pedidoRef.current?.focus();
+      pedidoRef.current?.select?.();
+    }, 50);
+    return () => window.clearTimeout(focusTimer);
+  }, [memberId, memberChecksReady, currentCheckoutAlert]);
 
   // --- NUEVO: PLC AUTO-DISPARADOR (Evita la condición de carrera del escáner) ---
   useEffect(() => {
@@ -381,29 +466,13 @@ export default function Caja() {
         return;
       }
 
-      let activeAlert: MemberAlert | null = null;
-      try {
-        const alertSnap = await getDoc(doc(db, "member_alerts", finalDni));
-        const alert = alertSnap.exists() ? ({ dni: finalDni, ...alertSnap.data() } as MemberAlert) : null;
-        activeAlert = isMemberAlertActive(alert, todayKey()) ? alert : null;
-      } catch (alertError: any) {
-        // Una falla transitoria no debe dejar Caja inutilizable. Se informa al
-        // operador que la verificacion no pudo completarse y la venta continua.
-        console.warn("No se pudo verificar la alerta del socio:", alertError);
-        setMsg("⚠️ No se pudieron verificar las alertas en este momento. Revisá la conexión.");
-      }
       if (lookupId !== memberLookupRef.current) return;
 
       setMemberId(finalDni);
-      setMemberAlert(activeAlert);
-      setAlertAcknowledged(false);
-
-      if (!activeAlert) {
-        setTimeout(() => {
-          pedidoRef.current?.focus();
-          pedidoRef.current?.select?.();
-        }, 50);
-      }
+      setMemberAlert(null);
+      setMemberRecordStatus("LOADING");
+      setMemberAlertStatus("LOADING");
+      setAcknowledgedAlertKeys([]);
 
     } catch (e: any) {
       setMsg(e.message);
@@ -414,7 +483,11 @@ export default function Caja() {
   }
 
   function handlePedidoEnter() {
-    if (hasPendingAlert) {
+    if (!memberChecksReady) {
+      setMsg("Esperá mientras se verifican los datos del socio.");
+      return;
+    }
+    if (currentCheckoutAlert) {
       setMsg("Confirmá la alerta del socio antes de continuar.");
       return;
     }
@@ -444,7 +517,11 @@ export default function Caja() {
 
   async function confirmIfReady(allowDouble: boolean, orderOverride?: OrderData, paymentOverride?: "EFECTIVO" | "MP" | "SUBVENCIONADO" | "LOTE_PREPAGO") {
     if (isLoading) return;
-    if (hasPendingAlert) {
+    if (!memberChecksReady) {
+      setMsg("Esperá mientras se verifican los datos del socio.");
+      return;
+    }
+    if (currentCheckoutAlert) {
       setMsg("Confirmá la alerta del socio antes de registrar la venta.");
       return;
     }
@@ -473,7 +550,7 @@ export default function Caja() {
       lastScansRef.current.set(memberId, Date.now()); 
       beep(true);
       setMemberInput(""); setOrderInput(""); setPaymentInput(""); setMemberId(""); setOrder(null); setIsSubsidized(false); setPaymentMethod(null); setMemberBundleRemaining(null);
-      setMemberProfile(null); setMemberAlert(null); setAlertAcknowledged(false);
+      setMemberProfile(null); setMemberAlert(null); setMemberRecordStatus("IDLE"); setMemberAlertStatus("IDLE"); setAcknowledgedAlertKeys([]);
       setTimeout(() => socioRef.current?.focus(), 50);
     } catch (e: any) {
       const m = String(e.message || e); 
@@ -484,12 +561,9 @@ export default function Caja() {
   }
 
   function acknowledgeMemberAlert() {
-    setAlertAcknowledged(true);
+    if (!currentCheckoutAlert) return;
+    setAcknowledgedAlertKeys((current) => [...current, currentCheckoutAlert.key]);
     setMsg("");
-    setTimeout(() => {
-      pedidoRef.current?.focus();
-      pedidoRef.current?.select?.();
-    }, 50);
   }
 
   useEffect(() => { 
@@ -617,7 +691,7 @@ export default function Caja() {
 
             <Card title="2) Escanear pedido (comida + destino)">
               <div style={{ display: "grid", gap: 8 }}>
-                  <input ref={pedidoRef} className="input" disabled={isLoading || hasPendingAlert} placeholder={hasPendingAlert ? "Confirmá la alerta antes de continuar" : "Luego escaneá el QR de MENU/VEGGIE + MESA/VIANDA"} value={orderInput} onChange={(e) => { const v = e.target.value; setOrderInput(v); if (hasEnter(v)) { const clean = v.replace(/[\r\n]+/g, " ").trim(); setOrderInput(clean); handlePedidoEnter(); } }} onKeyDown={(e) => { if (e.key === "Enter" || e.key === "NumpadEnter") { e.preventDefault(); handlePedidoEnter(); } }} />
+                  <input ref={pedidoRef} className="input" disabled={isLoading || hasPendingAlert} placeholder={!memberChecksReady && memberId ? "Verificando datos del socio..." : currentCheckoutAlert ? "Confirmá la alerta antes de continuar" : "Luego escaneá el QR de MENU/VEGGIE + MESA/VIANDA"} value={orderInput} onChange={(e) => { const v = e.target.value; setOrderInput(v); if (hasEnter(v)) { const clean = v.replace(/[\r\n]+/g, " ").trim(); setOrderInput(clean); handlePedidoEnter(); } }} onKeyDown={(e) => { if (e.key === "Enter" || e.key === "NumpadEnter") { e.preventDefault(); handlePedidoEnter(); } }} />
                 <div>Pedido: <b>{order ? `${order.itemType} • ${order.dest.mode}${order.dest.table ? " • " + order.dest.table : ""}` : "-"}</b></div>
               </div>
             </Card>
@@ -633,7 +707,7 @@ export default function Caja() {
 
             <Card title={(isSubsidized || memberBundleRemaining !== null) ? "3) Confirmar" : "4) Confirmar (Opcional si escaneó)"} right={<span style={{ color: "#9aa4c0" }}>Enter en “Pago” confirma.</span>}>
               {dupInfo.needed ? ( <div className="panel" style={{ borderColor: "var(--warn)", background: "rgba(245,158,11,.08)", marginBottom: 10 }}><div style={{ fontWeight: 700, marginBottom: 6 }}>Doble compra detectada</div><div style={{ color: "var(--muted)", marginBottom: 10 }}>{dupInfo.message}</div><div style={{ display: "flex", gap: 8 }}><button className="button" disabled={isLoading} onClick={() => confirmIfReady(true)}>{isLoading ? "Procesando..." : "Permitir y confirmar (F2)"}</button><button className="button outline" disabled={isLoading} onClick={() => { setDupInfo({ needed: false, message: "" }); setTimeout(() => socioRef.current?.focus(), 50); }}>Cancelar</button></div></div> ) : ( <div style={{ color: "var(--muted)" }}>Si hay duplicado se mostrará un aviso.</div> )}
-              <div style={{ marginTop: 8, display: "flex", gap: 8 }}><button className="button" disabled={!ready || isLoading || hasPendingAlert} onClick={() => confirmIfReady(false)}>{isLoading ? "Procesando..." : "Guardar Manualmente"}</button><button className="button outline" disabled={isLoading} onClick={() => { memberLookupRef.current += 1; setMemberInput(""); setOrderInput(""); setPaymentInput(""); setMemberId(""); setOrder(null); setIsSubsidized(false); setPaymentMethod(null); setMemberBundleRemaining(null); setMemberProfile(null); setMemberAlert(null); setAlertAcknowledged(false); setMsg(""); setDupInfo({ needed: false, message: "" }); socioRef.current?.focus(); }}>Limpiar</button></div>
+              <div style={{ marginTop: 8, display: "flex", gap: 8 }}><button className="button" disabled={!ready || isLoading || hasPendingAlert} onClick={() => confirmIfReady(false)}>{isLoading ? "Procesando..." : "Guardar Manualmente"}</button><button className="button outline" disabled={isLoading} onClick={() => { memberLookupRef.current += 1; setMemberInput(""); setOrderInput(""); setPaymentInput(""); setMemberId(""); setOrder(null); setIsSubsidized(false); setPaymentMethod(null); setMemberBundleRemaining(null); setMemberProfile(null); setMemberAlert(null); setMemberRecordStatus("IDLE"); setMemberAlertStatus("IDLE"); setAcknowledgedAlertKeys([]); setMsg(""); setDupInfo({ needed: false, message: "" }); socioRef.current?.focus(); }}>Limpiar</button></div>
               <div style={{ marginTop: 8, color: msg ? "var(--danger)" : "inherit", minHeight: 20 }}>{msg}</div>
             </Card>
           </div>
@@ -811,7 +885,7 @@ export default function Caja() {
         </div>
       )}
 
-      {hasPendingAlert && memberAlert && (
+      {currentCheckoutAlert && (
         <div
           role="alertdialog"
           aria-modal="true"
@@ -826,23 +900,21 @@ export default function Caja() {
             background: "rgba(3, 8, 20, 0.82)",
           }}
         >
-          <div className="panel" style={{ width: "min(620px, 100%)", border: `2px solid ${memberAlert.level === "IMPORTANTE" ? "#f59e0b" : "#3b82f6"}`, boxShadow: "0 24px 90px rgba(0,0,0,.55)" }}>
-            <div style={{ fontSize: 42, textAlign: "center" }}>{memberAlert.level === "IMPORTANTE" ? "⚠️" : "ℹ️"}</div>
+          <div className="panel" style={{ width: "min(620px, 100%)", border: `2px solid ${currentCheckoutAlert.level === "IMPORTANTE" ? "#f59e0b" : "#3b82f6"}`, boxShadow: "0 24px 90px rgba(0,0,0,.55)" }}>
+            <div style={{ fontSize: 42, textAlign: "center" }}>{currentCheckoutAlert.level === "IMPORTANTE" ? "⚠️" : "ℹ️"}</div>
             <h2 id="member-alert-title" style={{ textAlign: "center", margin: "4px 0 12px" }}>
-              Alerta de Gabinete Social
+              {currentCheckoutAlert.title}
             </h2>
             <div style={{ textAlign: "center", color: "var(--muted)", marginBottom: 16 }}>
-              {memberProfile?.firstName || memberProfile?.lastName
-                ? `${memberProfile.lastName}, ${memberProfile.firstName} · `
-                : ""}
+              {selectedMemberName ? `${selectedMemberName} · ` : ""}
               DNI {memberId}
             </div>
-            <div style={{ padding: 18, borderRadius: 12, background: memberAlert.level === "IMPORTANTE" ? "rgba(245,158,11,.14)" : "rgba(59,130,246,.14)", fontSize: 18, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-              {memberAlert.message}
+            <div style={{ padding: 18, borderRadius: 12, background: currentCheckoutAlert.level === "IMPORTANTE" ? "rgba(245,158,11,.14)" : "rgba(59,130,246,.14)", fontSize: 18, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+              {currentCheckoutAlert.message}
             </div>
-            {memberAlert.validUntil && (
+            {currentCheckoutAlert.validUntil && (
               <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 12, marginTop: 10 }}>
-                Vigente hasta {memberAlert.validUntil}
+                Vigente hasta {currentCheckoutAlert.validUntil}
               </div>
             )}
             <button className="button" style={{ width: "100%", marginTop: 18, padding: 14, fontSize: 16 }} onClick={acknowledgeMemberAlert} autoFocus>
