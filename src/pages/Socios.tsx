@@ -110,6 +110,7 @@ let cachedCursors: SourceCursors = { members: null, subsidized: null, sales: nul
 let cachedHasMore = true;
 let cachedCounts: SourceCounts = { members: null, subsidized: null, salesToday: null };
 let cachedAt: Date | null = null;
+let cachedOriginFilter: OriginFilter = "TODOS";
 
 function todayKey() {
   const date = new Date();
@@ -190,6 +191,11 @@ function normalizeResidency(value: unknown): ResidencyStatus {
   if (normalized === "SAN_ISIDRO" || normalized === "SANISIDRO") return "SAN_ISIDRO";
   if (normalized === "FUERA_SAN_ISIDRO" || normalized === "FUERA_DE_SAN_ISIDRO") return "FUERA_SAN_ISIDRO";
   return "SIN_VERIFICAR";
+}
+
+function normalizedSearchDni(value: string) {
+  const compact = value.trim().replace(/[.\s-]/g, "");
+  return /^\d+$/.test(compact) ? compact : "";
 }
 
 function emptyPurchaseSummary(): PurchaseSummary {
@@ -314,7 +320,7 @@ export default function Socios() {
   const [profileFilter, setProfileFilter] = useState<ProfileFilter>("TODAS");
   const [residencyFilter, setResidencyFilter] = useState<"TODAS" | ResidencyStatus>("TODAS");
   const [benefitFilter, setBenefitFilter] = useState<BenefitFilter>("TODOS");
-  const [originFilter, setOriginFilter] = useState<OriginFilter>("TODOS");
+  const [originFilter, setOriginFilter] = useState<OriginFilter>(cachedOriginFilter);
   const [loading, setLoading] = useState(cachedRows === null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -324,12 +330,15 @@ export default function Socios() {
   const [importProgress, setImportProgress] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(cachedAt);
   const initialLoadStarted = useRef(false);
+  const loadRequestRef = useRef(0);
+  const dniSearchTimerRef = useRef<number | null>(null);
 
-  function commitCache(nextRows: MemberRow[], nextCursors: SourceCursors, nextHasMore: boolean, nextCounts: SourceCounts) {
+  function commitCache(nextRows: MemberRow[], nextCursors: SourceCursors, nextHasMore: boolean, nextCounts: SourceCounts, mode: OriginFilter = originFilter) {
     cachedRows = nextRows;
     cachedCursors = nextCursors;
     cachedHasMore = nextHasMore;
     cachedCounts = nextCounts;
+    cachedOriginFilter = mode;
     cachedAt = new Date();
     setRows(nextRows);
     setCursors(nextCursors);
@@ -401,8 +410,9 @@ export default function Socios() {
     };
   }
 
-  async function loadMembers(reset = false) {
+  async function loadMembers(reset = false, mode: OriginFilter = originFilter, refreshCounts = false) {
     if (loading && !reset) return;
+    const requestId = ++loadRequestRef.current;
     setLoading(true);
     setError("");
     try {
@@ -414,30 +424,33 @@ export default function Socios() {
         ...(after ? [startAfter(after)] : []),
         limit(size),
       );
-      const todaySales = query(
+      const memberPageSize = mode === "TODOS" ? SOURCE_PAGE_SIZE.members : mode === "MEMBERS" ? PAGE_SIZE : 0;
+      const subsidizedPageSize = mode === "TODOS" ? SOURCE_PAGE_SIZE.subsidized : mode === "SUBSIDIZED" ? PAGE_SIZE : 0;
+      const salesPageSize = mode === "TODOS" ? SOURCE_PAGE_SIZE.sales : mode === "SALE_TODAY" ? PAGE_SIZE : 0;
+      const todaySales = salesPageSize ? query(
         collection(db, "sales"),
         where("dateKey", "==", todayKey()),
         orderBy(documentId()),
         ...(current.sales ? [startAfter(current.sales)] : []),
-        limit(SOURCE_PAGE_SIZE.sales),
-      );
-      const shouldCount = reset || counts.members === null || counts.subsidized === null || counts.salesToday === null;
+        limit(salesPageSize),
+      ) : null;
+      const shouldCount = refreshCounts || counts.members === null || counts.subsidized === null || counts.salesToday === null;
       const [membersSnap, subsidizedSnap, salesSnap, membersCountSnap, subsidizedCountSnap, salesCountSnap] = await Promise.all([
-        getDocs(pageQuery("members", current.members, SOURCE_PAGE_SIZE.members)),
-        getDocs(pageQuery("subsidized_members", current.subsidized, SOURCE_PAGE_SIZE.subsidized)),
-        getDocs(todaySales),
+        memberPageSize ? getDocs(pageQuery("members", current.members, memberPageSize)) : Promise.resolve(null),
+        subsidizedPageSize ? getDocs(pageQuery("subsidized_members", current.subsidized, subsidizedPageSize)) : Promise.resolve(null),
+        todaySales ? getDocs(todaySales) : Promise.resolve(null),
         shouldCount ? getCountFromServer(collection(db, "members")) : Promise.resolve(null),
         shouldCount ? getCountFromServer(collection(db, "subsidized_members")) : Promise.resolve(null),
         shouldCount ? getCountFromServer(query(collection(db, "sales"), where("dateKey", "==", todayKey()))) : Promise.resolve(null),
       ]);
-      const hydratedRows = await hydrateSources(membersSnap.docs, subsidizedSnap.docs, salesSnap.docs);
+      const hydratedRows = await hydrateSources(membersSnap?.docs ?? [], subsidizedSnap?.docs ?? [], salesSnap?.docs ?? []);
       const backfilled = await backfillSubsidizedMembers(hydratedRows);
       const pageRows = backfilled.rows;
       const merged = reset ? pageRows : mergeRows(rows, pageRows);
       const nextCursors = {
-        members: membersSnap.docs.at(-1)?.id ?? current.members,
-        subsidized: subsidizedSnap.docs.at(-1)?.id ?? current.subsidized,
-        sales: salesSnap.docs.at(-1)?.id ?? current.sales,
+        members: membersSnap?.docs.at(-1)?.id ?? current.members,
+        subsidized: subsidizedSnap?.docs.at(-1)?.id ?? current.subsidized,
+        sales: salesSnap?.docs.at(-1)?.id ?? current.sales,
       };
       const nextCounts = shouldCount ? {
         members: (membersCountSnap?.data().count ?? counts.members) === null
@@ -449,22 +462,41 @@ export default function Socios() {
         ...counts,
         members: counts.members === null ? null : counts.members + backfilled.created,
       };
-      const nextHasMore = membersSnap.size === SOURCE_PAGE_SIZE.members
-        || subsidizedSnap.size === SOURCE_PAGE_SIZE.subsidized
-        || salesSnap.size === SOURCE_PAGE_SIZE.sales;
-      commitCache(merged, nextCursors, nextHasMore, nextCounts);
+      const nextHasMore = Boolean(
+        (memberPageSize && membersSnap?.size === memberPageSize)
+        || (subsidizedPageSize && subsidizedSnap?.size === subsidizedPageSize)
+        || (salesPageSize && salesSnap?.size === salesPageSize)
+      );
+      if (requestId !== loadRequestRef.current) return;
+      commitCache(merged, nextCursors, nextHasMore, nextCounts, mode);
     } catch (loadError: any) {
-      setError(`No se pudo cargar el padrón: ${loadError?.message || String(loadError)}`);
+      if (requestId === loadRequestRef.current) {
+        setError(`No se pudo cargar el padrón: ${loadError?.message || String(loadError)}`);
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestRef.current) setLoading(false);
     }
   }
 
   useEffect(() => {
     if (initialLoadStarted.current || cachedRows) return;
     initialLoadStarted.current = true;
-    void loadMembers(true);
+    void loadMembers(true, originFilter, true);
   }, []);
+
+  useEffect(() => () => {
+    if (dniSearchTimerRef.current !== null) window.clearTimeout(dniSearchTimerRef.current);
+  }, []);
+
+  function selectOriginFilter(next: OriginFilter, preserveBenefitFilter = false) {
+    const target = next === originFilter && next !== "TODOS" ? "TODOS" : next;
+    setOriginFilter(target);
+    if (!preserveBenefitFilter) setBenefitFilter("TODOS");
+    setSelectedDni(null);
+    setRegistration(null);
+    setNotice("");
+    void loadMembers(true, target);
+  }
 
   function openRow(row: MemberRow) {
     setError("");
@@ -480,30 +512,40 @@ export default function Socios() {
     setNotice(`El DNI ${row.dni} aparece en ${source}, pero todavía no tiene ficha maestra. Completá los datos para registrarlo en Socios.`);
   }
 
-  async function searchExactDni() {
-    const dni = search.trim();
+  async function searchExactDni(requestedDni?: string) {
+    const dni = requestedDni ?? normalizedSearchDni(search);
     if (!PURE_DNI_RE.test(dni)) {
       setError("Para buscar fuera de los socios cargados, ingresá un DNI exacto de 7 u 8 números.");
       return;
     }
+    if (search !== dni) setSearch(dni);
     const existing = rows.find((row) => row.dni === dni);
     if (existing) {
       openRow(existing);
       return;
     }
+    const requestId = ++loadRequestRef.current;
     setLoading(true);
     setError("");
     setNotice("");
     try {
-      const [snapshot, subsidizedSnapshot] = await Promise.all([
+      const [snapshot, subsidizedSnapshot, salesSnapshot] = await Promise.all([
         getDoc(doc(db, "members", dni)),
         getDoc(doc(db, "subsidized_members", dni)),
+        getDocs(query(
+          collection(db, "sales"),
+          where("dateKey", "==", todayKey()),
+          where("member.id", "==", dni),
+          limit(1),
+        )),
       ]);
+      if (requestId !== loadRequestRef.current) return;
       if (!snapshot.exists()) {
         const subsidizedData = subsidizedSnapshot.exists() ? subsidizedSnapshot.data() : null;
         if (subsidizedSnapshot.exists()) {
           const hydrated = await hydrateSources([], [subsidizedSnapshot]);
           const backfilled = await backfillSubsidizedMembers(hydrated);
+          if (requestId !== loadRequestRef.current) return;
           const row = backfilled.rows[0];
           if (!row) throw new Error("No se pudo incorporar automáticamente el socio subvencionado.");
           const nextRows = mergeRows([row], rows);
@@ -519,6 +561,16 @@ export default function Socios() {
             : `El DNI ${dni} figura en Gabinete Social y todavía no tiene ficha maestra.`);
           return;
         }
+        if (!salesSnapshot.empty) {
+          const hydrated = await hydrateSources([], [], salesSnapshot.docs);
+          if (requestId !== loadRequestRef.current) return;
+          const row = hydrated[0];
+          if (!row) throw new Error("No se pudo cargar el socio encontrado en las ventas de hoy.");
+          const nextRows = mergeRows([row], rows);
+          commitCache(nextRows, cursors, hasMore, counts);
+          openRow(row);
+          return;
+        }
         if (!canManageMembers) {
           setError(`El DNI ${dni} no existe en el padrón de socios.`);
           return;
@@ -532,16 +584,40 @@ export default function Socios() {
         setNotice(`El DNI ${dni} todavía no existe en Socios. Podés registrarlo como un socio nuevo.`);
         return;
       }
-      const [row] = await hydrateSources([snapshot], subsidizedSnapshot.exists() ? [subsidizedSnapshot] : []);
+      const [row] = await hydrateSources(
+        [snapshot],
+        subsidizedSnapshot.exists() ? [subsidizedSnapshot] : [],
+        salesSnapshot.docs,
+      );
+      if (requestId !== loadRequestRef.current) return;
       if (!row) return;
       const nextRows = mergeRows([row], rows);
       commitCache(nextRows, cursors, hasMore, counts);
       setRegistration(null);
       setSelectedDni(dni);
     } catch (searchError: any) {
-      setError(`No se pudo buscar el socio: ${searchError?.message || String(searchError)}`);
+      if (requestId === loadRequestRef.current) {
+        setError(`No se pudo buscar el socio: ${searchError?.message || String(searchError)}`);
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestRef.current) setLoading(false);
+    }
+  }
+
+  function handleSearchChange(value: string) {
+    setSearch(value);
+    if (dniSearchTimerRef.current !== null) window.clearTimeout(dniSearchTimerRef.current);
+    const dni = normalizedSearchDni(value);
+    if (!PURE_DNI_RE.test(dni)) return;
+    dniSearchTimerRef.current = window.setTimeout(() => {
+      void searchExactDni(dni);
+    }, 600);
+  }
+
+  function handleBenefitFilterChange(next: BenefitFilter) {
+    setBenefitFilter(next);
+    if (next === "SUBVENCIONADO" && originFilter !== "SUBSIDIZED") {
+      selectOriginFilter("SUBSIDIZED", true);
     }
   }
 
@@ -700,9 +776,11 @@ export default function Socios() {
 
   const filteredRows = useMemo(() => {
     const term = search.trim().toLocaleLowerCase("es");
+    const exactDni = normalizedSearchDni(search);
     return rows.filter((row) => {
       const activeAlert = isMemberAlertActive(row.alert, todayKey());
       const searchable = [row.dni, row.profile.firstName, row.profile.lastName, row.profile.birthDate, row.profile.address.street, row.profile.address.number, row.profile.address.locality, row.qrCodes.join(" "), activeAlert ? row.alert?.message : ""].join(" ").toLocaleLowerCase("es");
+      if (PURE_DNI_RE.test(exactDni) && row.dni === exactDni) return true;
       if (term && !searchable.includes(term)) return false;
       if (originFilter !== "TODOS" && !row.origins.includes(originFilter)) return false;
       if (profileFilter !== "TODAS" && row.profile.profileStatus !== profileFilter) return false;
@@ -897,29 +975,29 @@ export default function Socios() {
               />
             </label>
           )}
-          <button className="button outline" onClick={() => void loadMembers(true)} disabled={loading}>{loading ? "Actualizando..." : "Actualizar"}</button>
+          <button className="button outline" onClick={() => void loadMembers(true, originFilter, true)} disabled={loading}>{loading ? "Actualizando..." : "Actualizar"}</button>
           <button className="button" onClick={exportExcel} disabled={loading || filteredRows.length === 0}>Exportar cargados</button>
         </div>
       </div>
 
       <div className="socios-summary socios-summary-four">
-        <SummaryCard label="Fichas maestras" value={counts.members ?? "—"} active={originFilter === "MEMBERS"} onClick={() => setOriginFilter(originFilter === "MEMBERS" ? "TODOS" : "MEMBERS")} />
-        <SummaryCard label="Subvencionados" value={counts.subsidized ?? "—"} tone="info" active={originFilter === "SUBSIDIZED"} onClick={() => setOriginFilter(originFilter === "SUBSIDIZED" ? "TODOS" : "SUBSIDIZED")} />
-        <SummaryCard label="Ventas registradas hoy" value={counts.salesToday ?? "—"} tone="ok" active={originFilter === "SALE_TODAY"} onClick={() => setOriginFilter(originFilter === "SALE_TODAY" ? "TODOS" : "SALE_TODAY")} />
-        <SummaryCard label="Todos los cargados" value={rows.length} tone="info" active={originFilter === "TODOS"} onClick={() => setOriginFilter("TODOS")} />
+        <SummaryCard label="Fichas maestras" value={counts.members ?? "—"} active={originFilter === "MEMBERS"} onClick={() => selectOriginFilter("MEMBERS")} />
+        <SummaryCard label="Subvencionados" value={counts.subsidized ?? "—"} tone="info" active={originFilter === "SUBSIDIZED"} onClick={() => selectOriginFilter("SUBSIDIZED")} />
+        <SummaryCard label="Ventas registradas hoy" value={counts.salesToday ?? "—"} tone="ok" active={originFilter === "SALE_TODAY"} onClick={() => selectOriginFilter("SALE_TODAY")} />
+        <SummaryCard label="Todos los cargados" value={rows.length} tone="info" active={originFilter === "TODOS"} onClick={() => selectOriginFilter("TODOS")} />
       </div>
 
       <Card title="Buscar y filtrar los socios cargados">
         <div className="socios-filters">
           <label><span>Buscar</span><div className="socios-search-row">
-            <input className="input" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && PURE_DNI_RE.test(search.trim())) void searchExactDni(); }} placeholder="Nombre, domicilio o DNI" />
-            <button className="button outline" onClick={() => void searchExactDni()} disabled={loading || !PURE_DNI_RE.test(search.trim())}>Buscar DNI</button>
+            <input className="input" value={search} onChange={(event) => handleSearchChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && PURE_DNI_RE.test(normalizedSearchDni(search))) void searchExactDni(); }} placeholder="Nombre, domicilio o DNI" />
+            <button className="button outline" onClick={() => void searchExactDni()} disabled={loading || !PURE_DNI_RE.test(normalizedSearchDni(search))}>Buscar DNI</button>
           </div></label>
           <label><span>Ficha</span><select className="input" value={profileFilter} onChange={(event) => setProfileFilter(event.target.value as ProfileFilter)}><option value="TODAS">Todas</option><option value="COMPLETO">Completa</option><option value="INCOMPLETO">Incompleta</option></select></label>
           <label><span>Residencia</span><select className="input" value={residencyFilter} onChange={(event) => setResidencyFilter(event.target.value as "TODAS" | ResidencyStatus)}><option value="TODAS">Todas</option><option value="SAN_ISIDRO">San Isidro</option><option value="FUERA_SAN_ISIDRO">Fuera de San Isidro</option><option value="SIN_VERIFICAR">Sin verificar</option></select></label>
-          <label><span>Beneficio</span><select className="input" value={benefitFilter} onChange={(event) => setBenefitFilter(event.target.value as BenefitFilter)}><option value="TODOS">Todos</option><option value="SUBVENCIONADO">Subvencionado activo</option><option value="LOTE">Lote activo</option><option value="SIN_BENEFICIO">Sin beneficio activo</option></select></label>
+          <label><span>Beneficio</span><select className="input" value={benefitFilter} onChange={(event) => handleBenefitFilterChange(event.target.value as BenefitFilter)}><option value="TODOS">Todos</option><option value="SUBVENCIONADO">Subvencionado activo</option><option value="LOTE">Lote activo</option><option value="SIN_BENEFICIO">Sin beneficio activo</option></select></label>
         </div>
-        <div className="socios-filter-help">Los indicadores superiores también funcionan como filtros. Los demás filtros se aplican sobre los socios ya cargados. Para consultar cualquier persona sin recorrer todo el padrón, ingresá el DNI exacto.</div>
+        <div className="socios-filter-help">Los indicadores superiores consultan directamente la fuente elegida en páginas de {PAGE_SIZE}. Un DNI de 7 u 8 dígitos se busca automáticamente en toda la base; nombre y domicilio se filtran sobre la página cargada.</div>
       </Card>
 
       {error && <div className="socios-message error">{error}</div>}
@@ -970,7 +1048,7 @@ export default function Socios() {
               })}</tbody>
             </table></div>
           )}
-          <div className="socios-pager"><span>Cada consulta lee hasta {PAGE_SIZE} registros base y elimina DNIs duplicados.</span>{hasMore ? <button className="button outline" onClick={() => void loadMembers(false)} disabled={loading}>{loading ? "Cargando..." : `Cargar ${PAGE_SIZE} más`}</button> : <span className="socios-end">Fin de las fuentes</span>}</div>
+          <div className="socios-pager"><span>Esta vista consulta hasta {PAGE_SIZE} registros por página y elimina DNIs duplicados.</span>{hasMore ? <button className="button outline" onClick={() => void loadMembers(false, originFilter)} disabled={loading}>{loading ? "Cargando..." : `Cargar ${PAGE_SIZE} más`}</button> : <span className="socios-end">Fin de la fuente</span>}</div>
         </Card>
         {registration && canManageMembers ? (
           <RegisterMemberForm
