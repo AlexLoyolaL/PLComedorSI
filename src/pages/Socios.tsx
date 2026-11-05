@@ -3,6 +3,7 @@ import {
   collection,
   doc,
   documentId,
+  endAt,
   getCountFromServer,
   getDoc,
   getDocs,
@@ -10,6 +11,7 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  startAt,
   startAfter,
   where,
   writeBatch,
@@ -198,6 +200,10 @@ function normalizedSearchDni(value: string) {
   return /^\d+$/.test(compact) ? compact : "";
 }
 
+function normalizedNameSearch(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLocaleUpperCase("es-AR");
+}
+
 function emptyPurchaseSummary(): PurchaseSummary {
   return { total: 0, firstDate: "", lastDate: "", efectivo: 0, mercadoPago: 0, lote: 0, subsidized: 0 };
 }
@@ -317,6 +323,8 @@ export default function Socios() {
   const [counts, setCounts] = useState<SourceCounts>(cachedCounts);
   const [selectedDni, setSelectedDni] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [globalSearchDnis, setGlobalSearchDnis] = useState<string[]>([]);
+  const [globalSearchTerm, setGlobalSearchTerm] = useState("");
   const [profileFilter, setProfileFilter] = useState<ProfileFilter>("TODAS");
   const [residencyFilter, setResidencyFilter] = useState<"TODAS" | ResidencyStatus>("TODAS");
   const [benefitFilter, setBenefitFilter] = useState<BenefitFilter>("TODOS");
@@ -519,6 +527,8 @@ export default function Socios() {
       return;
     }
     if (search !== dni) setSearch(dni);
+    setGlobalSearchDnis([]);
+    setGlobalSearchTerm("");
     const existing = rows.find((row) => row.dni === dni);
     if (existing) {
       openRow(existing);
@@ -604,14 +614,118 @@ export default function Socios() {
     }
   }
 
+  async function searchByName(requestedTerm?: string) {
+    const term = normalizedNameSearch(requestedTerm ?? search);
+    if (term.length < 2 || /^\d+$/.test(term)) {
+      setError("Ingresá al menos 2 letras del nombre o apellido.");
+      return;
+    }
+
+    const prefix = term.split(" ")[0];
+    const requestId = ++loadRequestRef.current;
+    setLoading(true);
+    setError("");
+    setNotice("");
+    try {
+      const prefixEnd = `${prefix}\uf8ff`;
+      const [lastNameSnap, firstNameSnap] = await Promise.all([
+        getDocs(query(
+          collection(db, "members"),
+          orderBy("lastName"),
+          startAt(prefix),
+          endAt(prefixEnd),
+          limit(PAGE_SIZE),
+        )),
+        getDocs(query(
+          collection(db, "members"),
+          orderBy("firstName"),
+          startAt(prefix),
+          endAt(prefixEnd),
+          limit(PAGE_SIZE),
+        )),
+      ]);
+      if (requestId !== loadRequestRef.current) return;
+
+      const documents = new Map<string, MemberDocument>();
+      [...lastNameSnap.docs, ...firstNameSnap.docs].forEach((snapshot) => documents.set(snapshot.id, snapshot));
+      if (!documents.size) {
+        const legacyNameSnap = await getDocs(query(
+          collection(db, "members"),
+          orderBy("name"),
+          startAt(prefix),
+          endAt(prefixEnd),
+          limit(PAGE_SIZE),
+        ));
+        if (requestId !== loadRequestRef.current) return;
+        legacyNameSnap.docs.forEach((snapshot) => documents.set(snapshot.id, snapshot));
+      }
+      if (!documents.size) {
+        setGlobalSearchDnis([]);
+        setGlobalSearchTerm(term);
+        setNotice(`No se encontraron socios cuyo nombre o apellido coincida con “${term}”.`);
+        return;
+      }
+
+      const hydrated = await hydrateSources(Array.from(documents.values()).slice(0, 30));
+      if (requestId !== loadRequestRef.current) return;
+      const searchTerms = term.toLocaleLowerCase("es").split(" ").filter(Boolean);
+      const ordered = hydrated
+        .filter((row) => {
+          const fullName = `${row.profile.firstName} ${row.profile.lastName}`.toLocaleLowerCase("es");
+          return searchTerms.every((searchTerm) => fullName.includes(searchTerm));
+        })
+        .sort((a, b) => displayName(a).localeCompare(displayName(b), "es"));
+      if (!ordered.length) {
+        setGlobalSearchDnis([]);
+        setGlobalSearchTerm(term);
+        setNotice(`No se encontraron socios cuyo nombre o apellido coincida con “${term}”.`);
+        return;
+      }
+      const foundDnis = ordered.map((row) => row.dni);
+      const foundSet = new Set(foundDnis);
+      const nextRows = [...ordered, ...rows.filter((row) => !foundSet.has(row.dni))];
+      commitCache(nextRows, cursors, hasMore, counts);
+      setGlobalSearchDnis(foundDnis);
+      setGlobalSearchTerm(term);
+      setSelectedDni(null);
+      setRegistration(null);
+      setNotice(`✅ Se buscaron coincidencias en toda la base y se encontraron ${foundDnis.length} socios.`);
+    } catch (searchError: any) {
+      if (requestId === loadRequestRef.current) {
+        setGlobalSearchDnis([]);
+        setError(`No se pudo buscar por nombre o apellido: ${searchError?.message || String(searchError)}`);
+      }
+    } finally {
+      if (requestId === loadRequestRef.current) setLoading(false);
+    }
+  }
+
+  function runGlobalSearch() {
+    const dni = normalizedSearchDni(search);
+    if (PURE_DNI_RE.test(dni)) {
+      void searchExactDni(dni);
+      return;
+    }
+    void searchByName();
+  }
+
   function handleSearchChange(value: string) {
     setSearch(value);
+    setGlobalSearchDnis([]);
+    setGlobalSearchTerm("");
     if (dniSearchTimerRef.current !== null) window.clearTimeout(dniSearchTimerRef.current);
     const dni = normalizedSearchDni(value);
-    if (!PURE_DNI_RE.test(dni)) return;
+    if (PURE_DNI_RE.test(dni)) {
+      dniSearchTimerRef.current = window.setTimeout(() => {
+        void searchExactDni(dni);
+      }, 600);
+      return;
+    }
+    const nameTerm = normalizedNameSearch(value);
+    if (nameTerm.length < 3 || /^\d+$/.test(nameTerm)) return;
     dniSearchTimerRef.current = window.setTimeout(() => {
-      void searchExactDni(dni);
-    }, 600);
+      void searchByName(nameTerm);
+    }, 800);
   }
 
   function handleBenefitFilterChange(next: BenefitFilter) {
@@ -775,13 +889,17 @@ export default function Socios() {
   }
 
   const filteredRows = useMemo(() => {
-    const term = search.trim().toLocaleLowerCase("es");
+    const normalizedTerm = normalizedNameSearch(search);
+    const terms = normalizedTerm.toLocaleLowerCase("es").split(" ").filter(Boolean);
     const exactDni = normalizedSearchDni(search);
+    const globalResultSet = new Set(globalSearchDnis);
+    const hasActiveGlobalSearch = globalSearchTerm === normalizedTerm && globalResultSet.size > 0;
     return rows.filter((row) => {
       const activeAlert = isMemberAlertActive(row.alert, todayKey());
       const searchable = [row.dni, row.profile.firstName, row.profile.lastName, row.profile.birthDate, row.profile.address.street, row.profile.address.number, row.profile.address.locality, row.qrCodes.join(" "), activeAlert ? row.alert?.message : ""].join(" ").toLocaleLowerCase("es");
       if (PURE_DNI_RE.test(exactDni) && row.dni === exactDni) return true;
-      if (term && !searchable.includes(term)) return false;
+      if (terms.length && !terms.every((term) => searchable.includes(term))) return false;
+      if (hasActiveGlobalSearch && globalResultSet.has(row.dni)) return true;
       if (originFilter !== "TODOS" && !row.origins.includes(originFilter)) return false;
       if (profileFilter !== "TODAS" && row.profile.profileStatus !== profileFilter) return false;
       if (residencyFilter !== "TODAS" && row.profile.residencyStatus !== residencyFilter) return false;
@@ -790,7 +908,7 @@ export default function Socios() {
       if (benefitFilter === "SIN_BENEFICIO" && (hasActiveSubsidy(row) || hasActiveBundle(row))) return false;
       return true;
     });
-  }, [rows, search, originFilter, profileFilter, residencyFilter, benefitFilter]);
+  }, [rows, search, globalSearchDnis, globalSearchTerm, originFilter, profileFilter, residencyFilter, benefitFilter]);
 
   const selected = selectedDni ? rows.find((row) => row.dni === selectedDni) ?? null : null;
 
@@ -990,14 +1108,14 @@ export default function Socios() {
       <Card title="Buscar y filtrar los socios cargados">
         <div className="socios-filters">
           <label><span>Buscar</span><div className="socios-search-row">
-            <input className="input" value={search} onChange={(event) => handleSearchChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && PURE_DNI_RE.test(normalizedSearchDni(search))) void searchExactDni(); }} placeholder="Nombre, domicilio o DNI" />
-            <button className="button outline" onClick={() => void searchExactDni()} disabled={loading || !PURE_DNI_RE.test(normalizedSearchDni(search))}>Buscar DNI</button>
+            <input className="input" value={search} onChange={(event) => handleSearchChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); runGlobalSearch(); } }} placeholder="Nombre, apellido, domicilio o DNI" />
+            <button className="button outline" onClick={runGlobalSearch} disabled={loading || (!PURE_DNI_RE.test(normalizedSearchDni(search)) && normalizedNameSearch(search).length < 2)}>Buscar en toda la base</button>
           </div></label>
           <label><span>Ficha</span><select className="input" value={profileFilter} onChange={(event) => setProfileFilter(event.target.value as ProfileFilter)}><option value="TODAS">Todas</option><option value="COMPLETO">Completa</option><option value="INCOMPLETO">Incompleta</option></select></label>
           <label><span>Residencia</span><select className="input" value={residencyFilter} onChange={(event) => setResidencyFilter(event.target.value as "TODAS" | ResidencyStatus)}><option value="TODAS">Todas</option><option value="SAN_ISIDRO">San Isidro</option><option value="FUERA_SAN_ISIDRO">Fuera de San Isidro</option><option value="SIN_VERIFICAR">Sin verificar</option></select></label>
           <label><span>Beneficio</span><select className="input" value={benefitFilter} onChange={(event) => handleBenefitFilterChange(event.target.value as BenefitFilter)}><option value="TODOS">Todos</option><option value="SUBVENCIONADO">Subvencionado activo</option><option value="LOTE">Lote activo</option><option value="SIN_BENEFICIO">Sin beneficio activo</option></select></label>
         </div>
-        <div className="socios-filter-help">Los indicadores superiores consultan directamente la fuente elegida en páginas de {PAGE_SIZE}. Un DNI de 7 u 8 dígitos se busca automáticamente en toda la base; nombre y domicilio se filtran sobre la página cargada.</div>
+        <div className="socios-filter-help">Los indicadores superiores consultan directamente la fuente elegida en páginas de {PAGE_SIZE}. DNI, nombre y apellido se buscan automáticamente en toda la base. Domicilio y demás datos se filtran sobre los registros cargados.</div>
       </Card>
 
       {error && <div className="socios-message error">{error}</div>}
