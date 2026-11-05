@@ -1,4 +1,4 @@
-import { doc, onSnapshot, collection, query, where } from "firebase/firestore";
+import { onSnapshot, collection, query, where } from "firebase/firestore";
 import { useEffect, useMemo, useState } from "react";
 import { db } from "../firebase";
 import { todayKey, tableLabelFromKey } from "../lib/sales";
@@ -28,7 +28,6 @@ function emptyAgg(): Agg {
 }
 
 export default function Cocina() {
-  const [aggDoc, setAggDoc] = useState<Agg | null>(null);
   const [calc, setCalc] = useState<Agg>(emptyAgg());
   const [salesRows, setSalesRows] = useState<SaleRow[]>([]);
 
@@ -38,16 +37,8 @@ export default function Cocina() {
   CELIACO: 0,
 });
 
-  // A) Escucha el agregado del día
-  useEffect(() => {
-    const key = todayKey();
-    const unsub = onSnapshot(doc(db, "dayAgg", key), (snap) => {
-      setAggDoc((snap.exists() ? (snap.data() as any) : null) as Agg | null);
-    });
-    return () => unsub();
-  }, []);
-
-  // B) Fallback: si no hay dayAgg, calcula desde sales del día (ignora anuladas)
+  // Fuente de verdad: ventas del día. El agregado dayAgg puede desfasarse si una
+  // escritura queda a mitad de camino; las ventas conservan el estado real.
   useEffect(() => {
     const key = todayKey();
     const q = query(collection(db, "sales"), where("dateKey", "==", key));
@@ -80,7 +71,7 @@ export default function Cocina() {
     });
     return () => unsub();
   }, []);
-  // C) Escucha agregados manuales del admin (añade a lo que ya hay)
+  // Escucha agregados manuales del admin (añade a lo que ya hay)
   useEffect(() => {
     const today = todayKey();
     const unsub = onSnapshot(collection(db, "adminAdds"), (snap) => {
@@ -108,10 +99,8 @@ export default function Cocina() {
   }, []);
 
 
-  const data: Agg = useMemo(() => aggDoc ?? calc, [aggDoc, calc]);
-
-  const comedor = data.comedor ?? { MENU: 0, VEGGIE: 0, CELIACO: 0, byTable: {} };
-  const vianda = data.vianda ?? { MENU: 0, VEGGIE: 0, CELIACO: 0 };
+  const comedor = calc.comedor;
+  const vianda = calc.vianda;
 
   // solo ventas reales de caja (vianda total menos lo solicitado por administración)
   const viandaSoloCaja = {

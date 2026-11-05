@@ -13,6 +13,7 @@ import {
   where,
   orderBy,
   getDocs,
+  writeBatch,
 } from "firebase/firestore";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
@@ -230,6 +231,17 @@ export async function createSaleTx(params: {
     vianda: { MENU: 0, VEGGIE: 0, CELIACO: 0 }
   };
 
+  if (params.dest.mode === "COMEDOR") {
+    const requestedTable = tableKey(params.dest.table)!;
+    const currentOccupants = Number(baseAgg.comedor?.byTable?.[requestedTable] ?? 0);
+    const maxCapacity = tableCapacityFromKey(requestedTable);
+    if (currentOccupants >= maxCapacity) {
+      throw new Error(
+        `¡La ${tableLabelFromKey(requestedTable)} ya está llena (${currentOccupants}/${maxCapacity})! Operación rechazada.`
+      );
+    }
+  }
+
   const limits = (settings.limits ?? {}) as {
     MENU?: number | null;
     VEGGIE?: number | null;
@@ -247,9 +259,10 @@ export async function createSaleTx(params: {
     throw new Error(`Límite diario alcanzado para ${params.itemType}.`);
   }
 
-  // 7) Alta de venta (Escritura simple)
+  // 7) Alta atómica: venta, índices y agregados se confirman juntos.
   const saleRef = doc(db, "sales", crypto.randomUUID());
-  setDoc(saleRef, {
+  const batch = writeBatch(db);
+  batch.set(saleRef, {
     dateKey: key,
     ts: serverTimestamp(),
     seller: params.seller,
@@ -266,16 +279,16 @@ export async function createSaleTx(params: {
 
   // 8) Sumar retiro si es subvencionado al contador de Gabinete
   if (isSubsidized) {
-    setDoc(subRef, { totalWithdrawals: increment(1) }, { merge: true });
+    batch.set(subRef, { totalWithdrawals: increment(1) }, { merge: true });
   }
 
   // --- INYECTADO: SI USA LOTE, LE RESTAMOS UNA VIANDA DE SU INVENTARIO ---
   if (finalPaymentMethod === "LOTE_PREPAGO") {
-    setDoc(memberRef, { active_bundle: { remaining: increment(-1) } }, { merge: true });
+    batch.set(memberRef, { active_bundle: { remaining: increment(-1) } }, { merge: true });
   }
 
   // 9) Índice socio/día
-  setDoc(indexRef, { 
+  batch.set(indexRef, {
     count: increment(1), 
     lastTs: serverTimestamp() 
   }, { merge: true });
@@ -302,7 +315,8 @@ export async function createSaleTx(params: {
     lotes_usados: increment(finalPaymentMethod === "LOTE_PREPAGO" ? 1 : 0) // Rastrea el uso de abonos
   };
 
-  setDoc(aggRef, upd, { merge: true });
+  batch.set(aggRef, upd, { merge: true });
+  await batch.commit();
 }
 
 // ---------- LISTADO EN VIVO ----------
@@ -318,54 +332,59 @@ export function listenTodaySales(setter: (rows: any[]) => void) {
   });
 }
 
-// ---------- ANULAR VENTA (VERSIÓN OFFLINE-READY Y FINANZAS) ----------
+// ---------- ANULAR VENTA (TRANSACCIÓN ATÓMICA Y FINANZAS) ----------
 export async function voidSaleTx(id: string, voided: boolean, reason?: string) {
-  const key = todayKey();
   const saleRef = doc(db, "sales", id);
-  const aggRef = doc(db, "dayAgg", key);
 
-  const s = await getDoc(saleRef).catch(() => null);
-  if (!s || !s.exists()) throw new Error("Venta no encontrada.");
-  const sale: any = s.data();
+  await runTransaction(db, async (tx) => {
+    const saleSnap = await tx.get(saleRef);
+    if (!saleSnap.exists()) throw new Error("Venta no encontrada.");
 
-  if (!!sale.voided === voided) return;
+    const sale: any = saleSnap.data();
+    if (!!sale.voided === voided) return;
 
-  const sign = voided ? -1 : 1;
-  const upd: any = { lastUpdated: serverTimestamp() };
+    const key = sale.dateKey || todayKey();
+    const aggRef = doc(db, "dayAgg", key);
+    const sign = voided ? -1 : 1;
+    const upd: any = { lastUpdated: serverTimestamp() };
 
-  // Armamos la estructura anidada para anular
-  if (sale.destination.mode === "COMEDOR") {
-    upd.comedor = { [sale.itemType]: increment(sign) };
-    if (sale.destination.table) {
-      const oldK = tableKey(sale.destination.table)!;
-      upd.comedor.byTable = { [oldK]: increment(sign) };
+    if (sale.destination.mode === "COMEDOR") {
+      upd.comedor = { [sale.itemType]: increment(sign) };
+      if (sale.destination.table) {
+        const oldK = tableKey(sale.destination.table)!;
+        upd.comedor.byTable = { [oldK]: increment(sign) };
+      }
+    } else {
+      upd.vianda = { [sale.itemType]: increment(sign) };
     }
-  } else {
-    upd.vianda = { [sale.itemType]: increment(sign) };
-  }
 
-  // --- INYECTADO: Reversión Financiera Desglosada ---
-  upd.financial = {
-    paid: increment((sale.isSubsidized || sale.paymentMethod === "LOTE_PREPAGO") ? 0 : sign),
-    subsidized: increment(sale.isSubsidized ? sign : 0),
-    efectivo: increment(sale.paymentMethod === "EFECTIVO" ? sign : 0),
-    mp: increment(sale.paymentMethod === "MP" ? sign : 0),
-    lotes_usados: increment(sale.paymentMethod === "LOTE_PREPAGO" ? sign : 0)
-  };
+    upd.financial = {
+      paid: increment((sale.isSubsidized || sale.paymentMethod === "LOTE_PREPAGO") ? 0 : sign),
+      subsidized: increment(sale.isSubsidized ? sign : 0),
+      efectivo: increment(sale.paymentMethod === "EFECTIVO" ? sign : 0),
+      mp: increment(sale.paymentMethod === "MP" ? sign : 0),
+      lotes_usados: increment(sale.paymentMethod === "LOTE_PREPAGO" ? sign : 0)
+    };
 
-  setDoc(aggRef, upd, { merge: true });
-  setDoc(saleRef, { voided, voidReason: reason ?? null, updatedAt: serverTimestamp() }, { merge: true });
+    tx.set(aggRef, upd, { merge: true });
+    tx.set(saleRef, { voided, voidReason: reason ?? null, updatedAt: serverTimestamp() }, { merge: true });
 
-  // Si anulamos una venta subvencionada, restamos el contador del Gabinete
-  if (sale.isSubsidized) {
-    const subRef = doc(db, "subsidized_members", sale.member.id);
-    setDoc(subRef, { totalWithdrawals: increment(sign) }, { merge: true });
-  }
+    if (sale.isSubsidized && sale.member?.id) {
+      tx.set(
+        doc(db, "subsidized_members", sale.member.id),
+        { totalWithdrawals: increment(sign) },
+        { merge: true }
+      );
+    }
 
-  // --- INYECTADO: SI SE ANULA UNA COMPRA CON LOTE, LE DEVOLVEMOS LA VIANDA AL SOCIO ---
-  if (sale.paymentMethod === "LOTE_PREPAGO") {
-    setDoc(doc(db, "members", sale.member.id), { active_bundle: { remaining: increment(-sign) } }, { merge: true });
-  }
+    if (sale.paymentMethod === "LOTE_PREPAGO" && sale.member?.id) {
+      tx.set(
+        doc(db, "members", sale.member.id),
+        { active_bundle: { remaining: increment(-sign) } },
+        { merge: true }
+      );
+    }
+  });
 }
 
 // ---------- EDITAR VENTA (VERSIÓN OFFLINE-READY + PATOVICA DE MESAS) ----------
@@ -569,8 +588,13 @@ export async function rebuildTodayAggFromSales() {
     }
   });
 
-  // Usamos merge: true para no borrar otros datos históricos
-  await setDoc(doc(db, "dayAgg", key), agg, { merge: true });
+  // Reemplaza estos mapas completos para eliminar valores residuales o corruptos,
+  // pero conserva campos ajenos (por ejemplo payments y extra).
+  await setDoc(
+    doc(db, "dayAgg", key),
+    { ...agg, lastUpdated: serverTimestamp() },
+    { mergeFields: ["comedor", "vianda", "financial", "lastUpdated"] }
+  );
 }
 
 // ---------- Permite filtrar por fecha ----------

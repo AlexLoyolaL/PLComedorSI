@@ -8,6 +8,9 @@ import {
   listenTodaySales,
   voidSaleTx,
   updateSaleTx,
+  tableCapacityFromKey,
+  tableKey,
+  tableLabelFromKey,
 } from "../lib/sales";
 import type { PaymentMethod } from "../lib/sales";
 import { Card } from "../ui/Card";
@@ -541,6 +544,22 @@ export default function Caja() {
       const limit = limits[tipo]; 
       const usadas = totalUsadas[tipo] ?? 0;
       if (typeof limit === "number" && limit >= 0 && usadas >= limit) { setMsg(`No hay más raciones para ${tipo}.`); beep(false); return; }
+    }
+
+    if (currentOrder.dest.mode === "COMEDOR") {
+      const requestedTable = tableKey(currentOrder.dest.table);
+      if (requestedTable) {
+        const currentOccupants = rows.reduce((total, sale) => {
+          if (sale.voided || sale.destination?.mode !== "COMEDOR") return total;
+          return tableKey(sale.destination.table) === requestedTable ? total + 1 : total;
+        }, 0);
+        const maxCapacity = tableCapacityFromKey(requestedTable);
+        if (currentOccupants >= maxCapacity) {
+          setMsg(`¡La ${tableLabelFromKey(requestedTable)} ya está llena (${currentOccupants}/${maxCapacity})! Operación rechazada.`);
+          beep(false);
+          return;
+        }
+      }
     }
 
     setIsLoading(true);
