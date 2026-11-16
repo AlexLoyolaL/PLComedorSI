@@ -64,6 +64,14 @@ const PAYMENT_LABELS: Record<PaymentMethod, string> = {
   LOTE_PREPAGO: "Lote prepago",
 };
 
+const PURE_DNI_RE = /^\d{7,8}$/;
+
+function canonicalDniFromLegacyKey(value: string) {
+  const raw = value.trim();
+  if (PURE_DNI_RE.test(raw)) return raw;
+  return raw.match(/^(\d{7,8})(?:\D|$)/)?.[1] ?? null;
+}
+
 function hasEnter(s: string) {
   return /\r|\n/.test(s);
 }
@@ -129,6 +137,8 @@ export default function Caja() {
   const [montoPagado, setMontoPagado] = useState(String(20 * PRECIO_VIANDA_LOTE));
   const [loteLoading, setLoteLoading] = useState(false);
   const [generatedLink, setGeneratedLink] = useState("");
+  const [loteError, setLoteError] = useState("");
+  const [repairingBundleId, setRepairingBundleId] = useState<string | null>(null);
   const [bundleSales, setBundleSales] = useState<any[]>([]);
 
   // Nombres de los socios visibles en Caja. Se consultan únicamente los DNI
@@ -355,6 +365,10 @@ export default function Caja() {
     : memberId && memberNames[memberId]
       ? `${memberNames[memberId].lastName}, ${memberNames[memberId].name}`
       : "";
+  const legacyBundleForMember = useMemo(
+    () => activeLotes.find((lote) => lote.dni !== memberId && canonicalDniFromLegacyKey(lote.dni) === memberId) ?? null,
+    [activeLotes, memberId]
+  );
 
   useEffect(() => {
     if (!memberId || !memberChecksReady || currentCheckoutAlert) return;
@@ -643,7 +657,13 @@ export default function Caja() {
 
   const handleGenerarLinkLote = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!loteDni.trim() || cantidadViandas <= 0 || !montoPagado) return;
+    const dni = loteDni.trim();
+    setLoteError("");
+    if (!PURE_DNI_RE.test(dni)) {
+      setLoteError("Ingresá únicamente el DNI: 7 u 8 números, sin nombre, teléfono, puntos ni comas.");
+      return;
+    }
+    if (cantidadViandas <= 0 || !montoPagado) return;
     setLoteLoading(true);
     setGeneratedLink("");
 
@@ -652,7 +672,7 @@ export default function Caja() {
       const generarLink = httpsCallable(functions, 'generarLinkLote');
       
       const result = await generarLink({
-        dni: loteDni.trim(),
+        dni,
         cantidadViandas: cantidadViandas,
         montoTotal: Number(montoPagado)
       });
@@ -660,10 +680,30 @@ export default function Caja() {
       const data = result.data as any;
       setGeneratedLink(data.init_point);
       
-    } catch (error: any) { 
-      alert("Error al generar el link. Verificá tu conexión o intentá de nuevo. Detalle: " + error.message); 
+    } catch (error: any) {
+      setLoteError(error.message || "No se pudo generar el link de pago.");
     } finally { 
       setLoteLoading(false); 
+    }
+  };
+
+  const repairLegacyBundle = async () => {
+    if (!memberId || !legacyBundleForMember) return;
+    setRepairingBundleId(legacyBundleForMember.dni);
+    setMsg("");
+    try {
+      const functions = getFunctions();
+      const repararLoteDni = httpsCallable(functions, "repararLoteDni");
+      const result = await repararLoteDni({
+        dni: memberId,
+        legacyMemberId: legacyBundleForMember.dni,
+      });
+      const repaired = result.data as { remaining?: number };
+      setMsg(`Lote reparado: ${repaired.remaining ?? legacyBundleForMember.remaining} viandas asociadas al DNI ${memberId}.`);
+    } catch (error: any) {
+      setMsg(error.message || "No se pudo reparar el lote.");
+    } finally {
+      setRepairingBundleId(null);
     }
   };
 
@@ -705,6 +745,21 @@ export default function Caja() {
                   {memberBundleRemaining !== null && ( <span style={{ background: '#10b981', color: '#fff', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 'bold' }}>🎟️ LOTE ACTIVO: {memberBundleRemaining} viandas</span> )}
                 </div>
                 {memberBundleRemaining !== null && memberBundleRemaining <= 3 && ( <div style={{ background: "rgba(239, 68, 68, 0.15)", border: "1px solid #ef4444", color: "#b91c1c", padding: 10, borderRadius: 6, fontWeight: "bold", marginTop: 8 }}>⚠️ ¡ATENCIÓN! Al socio le quedan solo {memberBundleRemaining} viandas en su lote. ¡Avisarle para renovar!</div> )}
+                {memberBundleRemaining === null && legacyBundleForMember && (
+                  <div style={{ background: "rgba(245, 158, 11, 0.12)", border: "1px solid #f59e0b", padding: 10, borderRadius: 6, marginTop: 8 }}>
+                    <div style={{ fontWeight: 700, marginBottom: 8 }}>
+                      ⚠️ Se encontró un lote de {legacyBundleForMember.remaining} viandas cargado con un identificador inválido.
+                    </div>
+                    <button
+                      type="button"
+                      className="button"
+                      onClick={repairLegacyBundle}
+                      disabled={repairingBundleId === legacyBundleForMember.dni}
+                    >
+                      {repairingBundleId === legacyBundleForMember.dni ? "Reparando..." : `Asociar lote al DNI ${memberId}`}
+                    </button>
+                  </div>
+                )}
               </div>
             </Card>
 
@@ -787,7 +842,17 @@ export default function Caja() {
             <form onSubmit={handleGenerarLinkLote} style={{ display: "grid", gap: 16 }}>
               <div>
                 <label style={{ display: "block", fontWeight: "bold", marginBottom: 6 }}>DNI del Socio:</label>
-                <input type="text" className="input" required placeholder="Ingrese el DNI numérico" value={loteDni} onChange={(e) => setLoteDni(e.target.value)} />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]{7,8}"
+                  maxLength={8}
+                  className="input"
+                  required
+                  placeholder="Ingrese únicamente 7 u 8 números"
+                  value={loteDni}
+                  onChange={(e) => { setLoteDni(e.target.value); setLoteError(""); }}
+                />
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -812,6 +877,12 @@ export default function Caja() {
               <div style={{ background: "rgba(245, 158, 11, 0.15)", padding: 12, borderRadius: 6, fontSize: 13, color: "#92400e", fontWeight: "bold" }}>
                 🔒 SEGURIDAD: Al generar el link, el sistema NO acredita las viandas. Se acreditarán automáticamente cuando el familiar/socio pague con éxito.
               </div>
+
+              {loteError && (
+                <div style={{ color: "var(--danger)", border: "1px solid var(--danger)", borderRadius: 6, padding: 10 }}>
+                  {loteError}
+                </div>
+              )}
 
               <button type="submit" className="button" style={{ background: "#3b82f6", color: "white", padding: "12px", fontWeight: "bold" }} disabled={loteLoading}>
                 {loteLoading ? "Conectando con Mercado Pago..." : "Generar Link de Pago 📱"}
