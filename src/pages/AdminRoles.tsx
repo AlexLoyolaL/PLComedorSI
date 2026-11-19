@@ -3,12 +3,14 @@ import { collection, query, where, getDocs, doc, getDoc, setDoc } from "firebase
 import { db } from "../firebase";
 import { Card } from "../ui/Card";
 import RequireRole from "../components/RequireRole";
+import { CENTER_IDS, CENTER_LABELS } from "../lib/centers";
+import type { CenterId } from "../lib/centers";
 
 
-type RoleType = "root" | "administrador" | "administrativo" | "cocina" | "visor" | "gabinete" | "remover";
+type RoleType = "root" | "administrador" | "administrativo" | "cobrador" | "cocina" | "visor" | "gabinete" | "remover";
 
 // Nombres exactos de los nodos en tu base de datos Firestore (app/roles)
-const ALL_ROLES = ["root", "administradores", "administrativos", "cocina", "directores", "gabinete"];
+const ALL_ROLES = ["root", "administradores", "administrativos", "cobradores", "cocina", "directores", "gabinete"];
 
 export default function AdminRolesPage() {
   return (
@@ -21,6 +23,7 @@ export default function AdminRolesPage() {
 function AdminRolesInner() {
   const [email, setEmail] = useState("");
   const [targetRole, setTargetRole] = useState<RoleType>("administrativo");
+  const [selectedCenters, setSelectedCenters] = useState<CenterId[]>(["PUERTO_LIBRE"]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState({ text: "", type: "" });
 
@@ -28,6 +31,10 @@ function AdminRolesInner() {
     const cleanEmail = email.trim().toLowerCase();
     if (!cleanEmail || !cleanEmail.includes("@")) {
       setMsg({ text: "Ingresá un correo válido.", type: "error" });
+      return;
+    }
+    if (targetRole === "cobrador" && selectedCenters.length === 0) {
+      setMsg({ text: "Seleccioná al menos una sede para el perfil de Cobros.", type: "error" });
       return;
     }
 
@@ -55,7 +62,7 @@ function AdminRolesInner() {
       const rolesRef = doc(db, "app", "roles");
       const rolesSnap = await getDoc(rolesRef);
       
-      let rolesData = rolesSnap.exists() ? rolesSnap.data() : {};
+      const rolesData = rolesSnap.exists() ? rolesSnap.data() : {};
 
       // 3. SoD Estricto: Limpiamos al usuario de TODOS los roles existentes
       ALL_ROLES.forEach(rol => {
@@ -75,8 +82,10 @@ function AdminRolesInner() {
         // Si el nodo no existe, lo creamos
         if (!rolesData[dbNode]) rolesData[dbNode] = {};
         
-        // Asignamos el true al UID
-        rolesData[dbNode][targetUid] = true;
+        // Cobros usa un permiso acotado por sede; los demás roles siguen siendo globales.
+        rolesData[dbNode][targetUid] = targetRole === "cobrador"
+          ? { centers: selectedCenters }
+          : true;
       }
 
       // 5. Impactamos la base de datos
@@ -85,14 +94,16 @@ function AdminRolesInner() {
       setMsg({ 
         text: targetRole === "remover" 
           ? `Acceso removido completamente para ${cleanEmail}` 
-          : `Rol '${targetRole}' asignado. Ya pueden recargar la página y entrar.`, 
+          : targetRole === "cobrador"
+            ? `Acceso a Cobros asignado para: ${selectedCenters.map((centerId) => CENTER_LABELS[centerId]).join(", ")}. Ya puede recargar la página.`
+            : `Rol '${targetRole}' asignado. Ya pueden recargar la página y entrar.`,
         type: "success" 
       });
       setEmail("");
 
-    } catch (e: any) {
-      console.error(e);
-      setMsg({ text: "Error de transacción: " + e.message, type: "error" });
+    } catch (error: unknown) {
+      console.error(error);
+      setMsg({ text: "Error de transacción: " + (error instanceof Error ? error.message : String(error)), type: "error" });
     } finally {
       setLoading(false);
     }
@@ -136,6 +147,7 @@ function AdminRolesInner() {
               style={{ width: "100%" }}
             >
               <option value="administrativo">Administrativo (Caja y Rendición)</option>
+              <option value="cobrador">Cobros por sede (solo Cobros y su rendición)</option>
               <option value="administrador">Administrador (Gestión de stock manual)</option>
               <option value="cocina">Cocina (Solo lectura monitor)</option>
               <option value="gabinete">Gabinete Social (Gestión de padrón)</option>
@@ -144,6 +156,30 @@ function AdminRolesInner() {
               <option value="remover" style={{ color: "red", fontWeight: "bold" }}>⛔ REVOCAR TODOS LOS ACCESOS</option>
             </select>
           </div>
+
+          {targetRole === "cobrador" && (
+            <div className="access-centers-panel">
+              <div className="access-centers-heading">
+                <div><strong>Sedes habilitadas</strong><span>Puede seleccionar una, varias o todas.</span></div>
+                <button type="button" className="button outline" onClick={() => setSelectedCenters(
+                  selectedCenters.length === CENTER_IDS.length ? [] : [...CENTER_IDS]
+                )}>{selectedCenters.length === CENTER_IDS.length ? "Quitar todas" : "Seleccionar todas"}</button>
+              </div>
+              <div className="access-centers-options">
+                {CENTER_IDS.map((centerId) => <label key={centerId} className={selectedCenters.includes(centerId) ? "active" : ""}>
+                  <input
+                    type="checkbox"
+                    checked={selectedCenters.includes(centerId)}
+                    onChange={() => setSelectedCenters((current) => current.includes(centerId)
+                      ? current.filter((item) => item !== centerId)
+                      : [...current, centerId]
+                    )}
+                  />
+                  <span>{CENTER_LABELS[centerId]}</span>
+                </label>)}
+              </div>
+            </div>
+          )}
 
           <button 
             className="button" 

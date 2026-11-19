@@ -1,0 +1,21 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "administrative_payments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "centerId", "order": "ASCENDING" },
+        { "fieldPath": "dateKey", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "administrative_payments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "member.dni", "order": "ASCENDING" },
+        { "fieldPath": "centerId", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

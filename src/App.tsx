@@ -11,8 +11,9 @@ import AdminRolesPage from "./pages/AdminRoles";
 import AuditoriaRendicionPage from "./pages/AuditoriaRendicion";
 import ListadoQRPage from "./pages/ListadoQR";
 import SociosPage from "./pages/Socios";
+import Cobros from "./pages/Cobros";
 
-type Tab = "caja" | "cocina" | "super" | "admin" | "rendicion" | "gabinete" | "adminRoles" | "auditoria" | "listadoQR" | "socios";
+type Tab = "caja" | "cobros" | "cocina" | "super" | "admin" | "rendicion" | "gabinete" | "adminRoles" | "auditoria" | "listadoQR" | "socios";
 
 export default function App() {
   const { user, role, loading, logout } = useAuth();
@@ -22,6 +23,8 @@ export default function App() {
   useEffect(() => {
     if (role === "cocina") {
       setTab("cocina");
+    } else if (role === "cobrador") {
+      setTab("cobros");
     } else if (role === "gabinete") {
       // Si el rol es estricto de gabinete, aterriza directo acá
       setTab("gabinete");
@@ -65,12 +68,16 @@ export default function App() {
   const isVisor = role === "visor" || role === "directores"; // Directores/Auditores
   const isAdministrativo = role === "administrativo";
   const isCocina = role === "cocina";
+  const isCobrador = role === "cobrador";
   
   // NUEVO: Extraemos Gabinete en su propia variable aislada
   const isGabinete = role === "gabinete"; 
 
   // 1. CAJA: Root, Admin, Cajeros y Visores (Gabinete NO)
   const canSeeCaja = isRoot || isAdmin || isAdministrativo || isVisor;
+
+  // COBROS ADMINISTRATIVOS: circuito separado de la Caja del comedor.
+  const canSeeCobros = isRoot || isAdmin || isAdministrativo || isVisor || isCobrador;
   
   // 2. COCINA: Root, Admin, Cajeros, Cocina y Visores (Gabinete NO)
   const canSeeCocina = isRoot || isAdmin || isAdministrativo || isCocina || isVisor;
@@ -108,6 +115,12 @@ export default function App() {
         {canSeeCaja && (
           <button className={`tab ${tab === "caja" ? "active" : ""}`} onClick={() => setTab("caja")}>
             Caja
+          </button>
+        )}
+
+        {canSeeCobros && (
+          <button className={`tab ${tab === "cobros" ? "active" : ""}`} onClick={() => setTab("cobros")}>
+            Cobros
           </button>
         )}
 
@@ -160,10 +173,9 @@ export default function App() {
           </button>
         )}
 
-        {/* Padrón unificado disponible para todos los perfiles habilitados. */}
-        <button className={`tab ${tab === "socios" ? "active" : ""}`} onClick={() => setTab("socios")}>
+        {!isCobrador && <button className={`tab ${tab === "socios" ? "active" : ""}`} onClick={() => setTab("socios")}>
           👥 Socios
-        </button>
+        </button>}
 
         <div className="fill" />
         <span className="badge">{user.email}</span>
@@ -174,6 +186,7 @@ export default function App() {
 
       <div style={{ padding: 16 }}>
         {tab === "caja" && canSeeCaja && <Caja />}
+        {tab === "cobros" && canSeeCobros && <Cobros />}
         {tab === "cocina" && canSeeCocina && <Cocina />}
         {tab === "super" && canSeeSuper && <Supervisor />}
         {tab === "gabinete" && canSeeGabinete && <Gabinete />}
@@ -182,7 +195,7 @@ export default function App() {
         {tab === "adminRoles" && isRoot && <AdminRolesPage />}
         {tab === "auditoria" && (isRoot || isAdmin || isVisor) && <AuditoriaRendicionPage />}
         {tab === "listadoQR" && isRoot && <ListadoQRPage />}
-        {tab === "socios" && <SociosPage />}
+        {tab === "socios" && !isCobrador && <SociosPage />}
       </div>
     </div>
   );

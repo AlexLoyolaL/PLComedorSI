@@ -435,9 +435,87 @@ body{
 .socios-audit-list > div{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 9px; border:1px solid #1b2544; border-radius:9px; background:#0d1429; }
 .socios-audit-list strong{ font-size:12px; }
 .socios-audit-list span{ color:var(--muted); font-size:11px; text-align:right; }
+.socios-payment-list{ display:grid; gap:6px; }
+.socios-payment-list > div{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:9px 10px; border:1px solid #1b2544; border-radius:9px; background:#0d1429; }
+.socios-payment-list > div.void{ opacity:.58; }
+.socios-payment-list > div > div{ display:grid; gap:2px; min-width:0; }
+.socios-payment-list > div > div:last-child{ text-align:right; }
+.socios-payment-list strong{ font-size:12px; }
+.socios-payment-list span{ overflow-wrap:anywhere; color:var(--muted); font-size:11px; }
+.socios-payment-list small{ color:#fca5a5; font-size:10px; }
 .socios-danger-zone{ padding:12px; border:1px solid rgba(239,68,68,.4); border-radius:12px; background:rgba(239,68,68,.07); }
 .socios-danger-zone p{ margin:0; color:#fecaca; font-size:12px; }
 .button.danger{ border-color:#991b1b; background:linear-gradient(180deg,#dc2626,#b91c1c); color:white; }
+
+/* Cobros administrativos: circuito separado de Caja comedor */
+.cobros-page{ display:grid; gap:16px; }
+.cobros-heading{ display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+.cobros-heading h1{ margin:0; font-size:28px; }
+.cobros-heading p{ margin:4px 0 0; color:var(--muted); }
+.cobros-center-control{ display:flex; align-items:end; gap:10px; }
+.cobros-center-control label{ display:grid; gap:4px; min-width:190px; }
+.cobros-center-control label > span{ color:var(--muted); font-size:11px; font-weight:600; }
+.cobros-center-control label > strong{ padding:9px 12px; border:1px solid var(--border); border-radius:10px; background:#0d1429; }
+.cobros-view-tabs{ display:flex; gap:7px; padding:5px; width:max-content; border:1px solid var(--border); border-radius:12px; background:#0d1429; }
+.cobros-view-tabs button{ padding:8px 13px; border:0; border-radius:8px; background:transparent; color:var(--muted); cursor:pointer; font-weight:700; }
+.cobros-view-tabs button.active{ background:#253154; color:var(--text); }
+.cobros-summary{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
+.cobros-summary .socios-stat strong{ font-size:21px; overflow-wrap:anywhere; }
+.cobros-layout{ display:grid; grid-template-columns:minmax(340px,.8fr) minmax(0,1.4fr); gap:16px; align-items:start; }
+.cobros-search{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; }
+.cobros-message{ margin-top:10px; }
+.cobros-candidates{ display:grid; gap:6px; max-height:230px; margin-top:10px; overflow:auto; }
+.cobros-candidates button{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 11px; border:1px solid var(--border); border-radius:10px; background:#0d1429; color:var(--text); cursor:pointer; text-align:left; }
+.cobros-candidates button:hover{ border-color:#4b6fb8; background:rgba(79,140,255,.08); }
+.cobros-candidates span{ color:var(--muted); font-size:11px; white-space:nowrap; }
+.cobros-selected{ display:grid; gap:2px; margin-top:10px; padding:11px 12px; border:1px solid rgba(34,197,94,.4); border-radius:11px; background:rgba(34,197,94,.08); }
+.cobros-selected span,.cobros-selected small{ color:var(--muted); font-size:11px; }
+.cobros-selected strong{ color:#bbf7d0; font-size:16px; }
+.cobros-form{ display:grid; gap:10px; }
+.cobros-form label{ display:grid; gap:4px; }
+.cobros-form label > span{ color:var(--muted); font-size:11px; font-weight:600; }
+.cobros-concept-options{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.cobros-form .cobros-concept-check{ display:flex; align-items:center; gap:9px; padding:11px 12px; border:1px solid var(--border); border-radius:11px; background:#0d1429; cursor:pointer; }
+.cobros-form .cobros-concept-check.active{ border-color:#60a5fa; background:rgba(59,130,246,.12); box-shadow:0 0 0 1px rgba(96,165,250,.2); }
+.cobros-concept-check input{ width:18px; height:18px; accent-color:var(--brand); }
+.cobros-form .cobros-concept-check > span{ color:var(--text); font-size:13px; }
+.cobros-concept-panel,.cobros-payment-panel{ display:grid; gap:9px; padding:12px; border:1px solid #253154; border-radius:12px; background:rgba(15,21,48,.55); }
+.cobros-concept-panel h3,.cobros-payment-panel h3{ margin:0; color:#cbd5e1; font-size:13px; text-transform:uppercase; letter-spacing:.05em; }
+.cobros-two-cols{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.cobros-form-total{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top:8px; border-top:1px solid var(--border); }
+.cobros-form-total span{ color:var(--muted); font-size:12px; }
+.cobros-form-total strong{ color:#86efac; font-size:21px; }
+.cobros-rate-note{ padding:8px 10px; border:1px solid rgba(59,130,246,.3); border-radius:9px; background:rgba(59,130,246,.08); color:#bfdbfe; font-size:11px; }
+.cobros-table-wrap{ max-height:390px; overflow:auto; }
+.cobros-table{ min-width:1040px; }
+.cobros-table thead{ position:sticky; top:0; z-index:1; background:var(--panel); }
+.cobros-table td{ vertical-align:middle; }
+.cobros-item-concepts{ display:flex; flex-wrap:wrap; gap:4px; min-width:130px; }
+.cobros-item-details{ display:grid; gap:4px; min-width:280px; }
+.cobros-item-details > div{ display:flex; justify-content:space-between; gap:12px; }
+.cobros-item-details span{ color:var(--muted); font-size:11px; }
+.cobros-item-details strong{ white-space:nowrap; font-size:11px; }
+.access-centers-panel{ display:grid; gap:10px; padding:12px; border:1px solid #2a375f; border-radius:12px; background:rgba(79,140,255,.06); }
+.access-centers-heading{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.access-centers-heading > div{ display:grid; gap:2px; }
+.access-centers-heading span{ color:var(--muted); font-size:11px; }
+.access-centers-heading .button{ padding:6px 9px; box-shadow:none; font-size:11px; }
+.access-centers-options{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:7px; }
+.access-centers-options label{ display:flex; align-items:center; gap:7px; padding:9px; border:1px solid var(--border); border-radius:9px; cursor:pointer; }
+.access-centers-options label.active{ border-color:#60a5fa; background:rgba(59,130,246,.12); }
+.access-centers-options input{ width:17px; height:17px; accent-color:var(--brand); }
+.cobros-rendicion{ display:grid; gap:16px; }
+.cobros-rendicion-toolbar{ display:flex; align-items:end; justify-content:space-between; gap:12px; }
+.cobros-rendicion-toolbar label,.cobros-rendicion-form label{ display:grid; gap:4px; }
+.cobros-rendicion-toolbar label > span,.cobros-rendicion-form label > span{ color:var(--muted); font-size:11px; font-weight:600; }
+.cobros-rendicion-form{ display:grid; gap:12px; }
+.cobros-differences{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+.cobros-differences span{ padding:9px; border:1px solid var(--border); border-radius:9px; background:#0d1429; color:var(--muted); font-size:11px; }
+.cobros-differences strong{ display:block; margin-top:2px; color:var(--text); font-size:14px; }
+.cobros-closure-banner{ display:flex; justify-content:space-between; gap:10px; margin-bottom:12px; padding:10px 12px; border:1px solid rgba(34,197,94,.4); border-radius:10px; background:rgba(34,197,94,.09); }
+.cobros-closure-banner span{ color:var(--muted); font-size:11px; }
+.cobros-void{ opacity:.58; text-decoration-color:var(--danger); }
+.cobros-void-button{ padding:5px 8px; box-shadow:none; font-size:11px; }
 
 @media (max-width: 1100px) {
   .appbar{ overflow-x:auto; }
@@ -445,6 +523,7 @@ body{
   .socios-summary{ grid-template-columns:repeat(3,minmax(0,1fr)); }
   .socios-layout{ grid-template-columns:1fr; }
   .socios-detail{ position:static; max-height:none; }
+  .cobros-layout{ grid-template-columns:1fr; }
 }
 
 @media (max-width: 720px) {
@@ -458,4 +537,11 @@ body{
   .socios-search-row{ align-items:stretch; }
   .socios-search-row .button{ white-space:normal; }
   .socios-pager{ align-items:stretch; flex-direction:column; }
+  .cobros-heading{ flex-direction:column; }
+  .cobros-center-control{ width:100%; align-items:stretch; flex-direction:column; }
+  .cobros-center-control label{ width:100%; }
+  .cobros-summary{ grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .cobros-search,.cobros-two-cols,.cobros-concept-options{ grid-template-columns:1fr; }
+  .cobros-differences,.access-centers-options{ grid-template-columns:1fr; }
+  .access-centers-heading,.cobros-rendicion-toolbar,.cobros-closure-banner{ align-items:stretch; flex-direction:column; }
 }

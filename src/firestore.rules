@@ -34,6 +34,38 @@ service cloud.firestore {
     function isGabineteStaff() {
       return signedIn() && getRoles().gabinete[request.auth.uid] == true;
     }
+    function isCobrosStaff() {
+      return signedIn() && getRoles().cobradores[request.auth.uid] != null;
+    }
+    function canAccessCobrosCenter(centerId) {
+      return isAdministrativo() || isVisor() || (
+        isCobrosStaff() && centerId in getRoles().cobradores[request.auth.uid].centers
+      );
+    }
+    function canOperateCobrosCenter(centerId) {
+      return isAdministrativo() || (
+        isCobrosStaff() && centerId in getRoles().cobradores[request.auth.uid].centers
+      );
+    }
+    function conceptsAllowedForCenter(data) {
+      return data.conceptKeys is list
+        && data.conceptKeys.size() > 0
+        && (
+          (data.centerId == 'PUERTO_LIBRE' && data.conceptKeys.hasOnly([
+            'BONO_CONTRIBUCION', 'LOCKER', 'INVITADO', 'PILETA'
+          ]))
+          || (data.centerId == 'ANEXO_19' && data.conceptKeys.hasOnly([
+            'BONO_CONTRIBUCION', 'ACTIVIDAD_1_SEMANAL', 'ACTIVIDAD_2_SEMANAL'
+          ]))
+          || (data.centerId == 'CENTRO_35' && data.conceptKeys.hasOnly([
+            'INSCRIPCION_ACTIVIDADES', 'ACTIVIDAD_1_SEMANAL', 'ACTIVIDAD_2_SEMANAL'
+          ]))
+        );
+    }
+    function cobrosDayIsOpen(data) {
+      return data.closureId == data.dateKey + '_' + data.centerId
+        && !exists(/databases/$(database)/documents/administrative_closures/$(data.closureId));
+    }
     function isStaff() {
       return signedIn() && (isAdministrativo() || isCocina() || isVisor());
     }
@@ -56,6 +88,45 @@ service cloud.firestore {
       allow read: if isAdministrativo() || isCocina() || isVisor();
       allow create, update: if isAdministrativo();
       allow delete: if false;
+    }
+
+    // --- Cobros administrativos: bono, lockers, invitados y pileta ---
+    // Es un circuito independiente de las ventas automatizadas del comedor.
+    match /administrative_payments/{id} {
+      allow read: if canAccessCobrosCenter(resource.data.centerId);
+      allow create: if canOperateCobrosCenter(request.resource.data.centerId)
+        && cobrosDayIsOpen(request.resource.data)
+        && request.resource.data.status == 'ACTIVE'
+        && request.resource.data.source == 'APP'
+        && request.resource.data.totalAmount is number
+        && request.resource.data.totalAmount > 0
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0
+        && conceptsAllowedForCenter(request.resource.data)
+        && request.resource.data.operator.uid == request.auth.uid
+        && request.resource.data.receiptNumber is string;
+      allow update: if canOperateCobrosCenter(resource.data.centerId)
+        && cobrosDayIsOpen(resource.data)
+        && resource.data.status == 'ACTIVE'
+        && request.resource.data.status == 'VOID'
+        && request.resource.data.voidedBy.uid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'voidedAt', 'voidedBy', 'voidReason'
+        ]);
+      // Los errores se anulan con motivo y responsable; nunca se borran.
+      allow delete: if false;
+    }
+
+    // Cierres diarios inmutables de Cobros, separados por fecha y sede.
+    match /administrative_closures/{id} {
+      allow read: if
+        (id.matches('.*_PUERTO_LIBRE') && canAccessCobrosCenter('PUERTO_LIBRE'))
+        || (id.matches('.*_ANEXO_19') && canAccessCobrosCenter('ANEXO_19'))
+        || (id.matches('.*_CENTRO_35') && canAccessCobrosCenter('CENTRO_35'));
+      allow create: if canOperateCobrosCenter(request.resource.data.centerId)
+        && id == request.resource.data.dateKey + '_' + request.resource.data.centerId
+        && request.resource.data.closedBy.uid == request.auth.uid;
+      allow update, delete: if false;
     }
 
     match /dayAgg/{day} {
@@ -112,8 +183,8 @@ service cloud.firestore {
     // cajeros (al resolver un carnet viejo en una venta) y Gabinete Social
     // (al dar de alta o reparar carnets viejos).
     match /qr_mappings/{document} {
-      allow read: if isStaff();
-      allow write: if isAdministrativo() || isGabinete();
+      allow read: if isStaff() || isCobrosStaff();
+      allow write: if isAdministrativo() || isGabinete() || isCobrosStaff();
     }
 
     // --- Auditoría de venta de lotes (Mercado Pago) ---
@@ -128,7 +199,7 @@ service cloud.firestore {
 
     match /members/{id} {
       // Todos los perfiles habilitados pueden consultar el padrón central.
-      allow read: if isStaff();
+      allow read: if isStaff() || isCobrosStaff();
 
       // Caja, administrativos y administradores pueden mantener la ficha completa.
       allow create, update: if isAdministrativo();

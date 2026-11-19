@@ -23,6 +23,12 @@ import { emptyMemberProfile, isMemberAlertActive, memberProfileFromData, residen
 import type { MemberAlert, MemberProfile, ResidencyStatus } from "../lib/members";
 import { useAuth } from "../state/AuthContext";
 import { Card } from "../ui/Card";
+import {
+  administrativeItemPeriod,
+  administrativePaymentConcepts,
+} from "../lib/administrativePayments";
+import type { AdministrativePayment } from "../lib/administrativePayments";
+import { CENTER_LABELS } from "../lib/centers";
 
 const PAGE_SIZE = 20;
 const SOURCE_PAGE_SIZE = { members: 7, subsidized: 7, sales: 6 } as const;
@@ -142,6 +148,14 @@ function formatDateKey(value: string) {
   if (!value) return "—";
   const parts = value.split("-");
   return parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : value;
+}
+
+function formatMoney(value: number) {
+  return new Intl.NumberFormat("es-AR", {
+    style: "currency",
+    currency: "ARS",
+    maximumFractionDigits: 0,
+  }).format(value);
 }
 
 function isFutureOrToday(value: any) {
@@ -317,6 +331,7 @@ export default function Socios() {
   const canImportExcel = role === "root";
   const canManageMembers = role === "root" || role === "administrador" || role === "administrativo";
   const canDeleteMembers = role === "root";
+  const canReadAdministrativePayments = role === "root" || role === "administrador" || role === "administrativo" || role === "visor";
   const [rows, setRows] = useState<MemberRow[]>(() => cachedRows ?? []);
   const [cursors, setCursors] = useState<SourceCursors>(cachedCursors);
   const [hasMore, setHasMore] = useState(cachedHasMore);
@@ -1176,7 +1191,7 @@ export default function Socios() {
             onRegister={registerMember}
           />
         ) : (
-          <MemberDetail row={selected} onClose={() => setSelectedDni(null)} onSave={saveMember} onDelete={deleteMember} canEdit={canManageMembers} canDelete={canDeleteMembers} />
+          <MemberDetail row={selected} onClose={() => setSelectedDni(null)} onSave={saveMember} onDelete={deleteMember} canEdit={canManageMembers} canDelete={canDeleteMembers} canReadAdministrativePayments={canReadAdministrativePayments} />
         )}
       </div>
     </div>
@@ -1298,13 +1313,14 @@ function summarizeSales(sales: DocumentData[]): PurchaseSummary {
   return summary;
 }
 
-function MemberDetail({ row, onClose, onSave, onDelete, canEdit, canDelete }: {
+function MemberDetail({ row, onClose, onSave, onDelete, canEdit, canDelete, canReadAdministrativePayments }: {
   row: MemberRow | null;
   onClose: () => void;
   onSave: (row: MemberRow, draft: MemberProfile) => Promise<void>;
   onDelete: (row: MemberRow) => Promise<void>;
   canEdit: boolean;
   canDelete: boolean;
+  canReadAdministrativePayments: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<MemberProfile | null>(null);
@@ -1313,6 +1329,7 @@ function MemberDetail({ row, onClose, onSave, onDelete, canEdit, canDelete }: {
   const [message, setMessage] = useState("");
   const [activity, setActivity] = useState<PurchaseSummary | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [administrativePayments, setAdministrativePayments] = useState<AdministrativePayment[]>([]);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
 
@@ -1320,21 +1337,27 @@ function MemberDetail({ row, onClose, onSave, onDelete, canEdit, canDelete }: {
     setEditing(false);
     setDraft(row?.profile ?? null);
     setMessage("");
-    if (!row) { setActivity(null); setAudit([]); return; }
+    if (!row) { setActivity(null); setAudit([]); setAdministrativePayments([]); return; }
     let active = true;
     setDetailsLoading(true);
     Promise.all([
       getDocs(query(collection(db, "sales"), where("member.id", "==", row.dni))),
       getDocs(query(collection(db, "member_audit"), where("dni", "==", row.dni))),
-    ]).then(([salesSnap, auditSnap]) => {
+      canReadAdministrativePayments
+        ? getDocs(query(collection(db, "administrative_payments"), where("member.dni", "==", row.dni)))
+        : Promise.resolve(null),
+    ]).then(([salesSnap, auditSnap, administrativePaymentsSnap]) => {
       if (!active) return;
       setActivity(summarizeSales(salesSnap.docs.map((snapshot) => snapshot.data())));
       setAudit(auditSnap.docs.map((snapshot) => ({ id: snapshot.id, ...snapshot.data() } as AuditEntry)).sort((a, b) => (asDate(b.createdAt)?.getTime() ?? 0) - (asDate(a.createdAt)?.getTime() ?? 0)));
+      setAdministrativePayments(administrativePaymentsSnap ? administrativePaymentsSnap.docs
+        .map((snapshot) => ({ id: snapshot.id, ...snapshot.data() } as AdministrativePayment))
+        .sort((a, b) => (asDate(b.createdAt)?.getTime() ?? 0) - (asDate(a.createdAt)?.getTime() ?? 0)) : []);
     }).catch((detailError: any) => {
       if (active) setMessage(`No se pudo cargar la actividad: ${detailError?.message || String(detailError)}`);
     }).finally(() => { if (active) setDetailsLoading(false); });
     return () => { active = false; };
-  }, [row?.dni, reloadToken]);
+  }, [row?.dni, reloadToken, canReadAdministrativePayments]);
 
   if (!row) return <div className="panel socios-detail socios-detail-placeholder"><div className="socios-detail-icon">👤</div><strong>Seleccioná un socio</strong><span>Usá “Ver / editar” para consultar y administrar la ficha.</span></div>;
 
@@ -1382,6 +1405,7 @@ function MemberDetail({ row, onClose, onSave, onDelete, canEdit, canDelete }: {
     <section><h3>Beneficios</h3><div className="socios-detail-grid"><DetailItem label="Subvención" value={hasActiveSubsidy(row) ? "Activa" : row.subsidizedData ? "Inactiva o vencida" : "No registrada"} /><DetailItem label="Vencimiento subvención" value={formatDate(row.subsidizedData?.expiresAt)} /><DetailItem label="Retiros subvencionados" value={Number(row.subsidizedData?.totalWithdrawals ?? 0)} /><DetailItem label="Lote" value={hasActiveBundle(row) ? "Activo" : bundle ? "Agotado o vencido" : "No registrado"} /><DetailItem label="Viandas disponibles" value={Number(bundle?.remaining ?? 0)} /><DetailItem label="Vencimiento lote" value={formatDate(bundle?.expiresAt)} /></div></section>
     <section><h3>Alerta</h3>{activeAlert ? <div className={`socios-alert ${row.alert?.level === "IMPORTANTE" ? "important" : ""}`}><strong>{row.alert?.level === "IMPORTANTE" ? "Importante" : "Información"}</strong><p>{row.alert?.message}</p><span>Vigencia: {row.alert?.validUntil ? formatDateKey(row.alert.validUntil) : "sin vencimiento"}</span></div> : <div className="socios-muted-box">No tiene alertas activas.</div>}</section>
     <section><h3>Actividad registrada</h3>{detailsLoading ? <div className="socios-muted-box">Cargando actividad de este socio...</div> : activity ? <div className="socios-detail-grid"><DetailItem label="Compras totales" value={activity.total} /><DetailItem label="Primera compra" value={formatDateKey(activity.firstDate)} /><DetailItem label="Última compra" value={formatDateKey(activity.lastDate)} /><DetailItem label="Efectivo" value={activity.efectivo} /><DetailItem label="Mercado Pago" value={activity.mercadoPago} /><DetailItem label="Usos de lote" value={activity.lote} /><DetailItem label="Retiros subvencionados" value={activity.subsidized} /></div> : null}</section>
+    {canReadAdministrativePayments && <section><h3>Cobros administrativos</h3>{detailsLoading ? <div className="socios-muted-box">Cargando cobros...</div> : administrativePayments.length ? <div className="socios-payment-list">{administrativePayments.slice(0, 20).map((payment) => <div key={payment.id} className={payment.status === "VOID" ? "void" : ""}><div><strong>{administrativePaymentConcepts(payment)}</strong><span>{CENTER_LABELS[payment.centerId]} · Recibo {payment.receiptNumber}</span>{payment.items.map((item) => <span key={item.concept}>{administrativeItemPeriod(item)} · {formatMoney(item.amount)}</span>)}</div><div><strong>{formatMoney(Number(payment.totalAmount || 0))}</strong><span>{payment.paymentMethod === "MP" ? "Pago virtual" : "Efectivo"} · {formatDate(payment.createdAt, true)}</span>{payment.status === "VOID" && <small>Anulado: {payment.voidReason || "sin motivo informado"}</small>}</div></div>)}</div> : <div className="socios-muted-box">No tiene cobros administrativos registrados.</div>}</section>}
     <section><h3>Carnets vinculados</h3>{row.qrCodes.length ? <div className="socios-code-list">{row.qrCodes.map((code) => <code key={code}>{code}</code>)}</div> : <div className="socios-muted-box">No tiene códigos QR antiguos vinculados.</div>}</section>
     <section><h3>Trazabilidad</h3><div className="socios-detail-grid"><DetailItem label="Alta" value={formatDate(row.memberData?.createdAt || row.subsidizedData?.createdAt, true)} /><DetailItem label="Creada por" value={row.memberData?.createdBy?.email || row.memberData?.createdBy?.name || "—"} /><DetailItem label="Última actualización" value={formatDate(row.memberData?.updatedAt, true)} /><DetailItem label="Actualizada por" value={row.memberData?.updatedBy?.email || row.memberData?.updatedBy?.name || "—"} /></div>{audit.length > 0 && <div className="socios-audit-list">{audit.slice(0, 8).map((entry) => <div key={entry.id}><strong>{entry.action === "CREATE" ? "Alta" : entry.action === "UPDATE" ? "Edición" : entry.action === "IMPORT" ? "Importación Excel" : "Eliminación"}</strong><span>{entry.actor?.email || entry.actor?.name || "Usuario sin identificar"} · {formatDate(entry.createdAt, true)}</span></div>)}</div>}</section>
     {canDelete && row.existsInMembers && <section className="socios-danger-zone"><h3>Eliminar del padrón</h3><p>Se conservarán las ventas históricas. La eliminación quedará registrada con tu usuario.</p><button className="button danger" onClick={() => void remove()} disabled={deleting}>{deleting ? "Eliminando..." : `Eliminar socio ${row.dni}`}</button></section>}
