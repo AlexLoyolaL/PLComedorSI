@@ -133,7 +133,7 @@ export default function CobrosRendicion({ centerId, canClose }: { centerId: Cent
     </div>
 
     <Card title="Detalle por concepto">
-      {Object.keys(byConcept).length === 0 ? <div className="socios-muted-box">No hay cobros vigentes para esta fecha y sede.</div> : <div className="cobros-table-wrap"><table className="table">
+      {Object.keys(byConcept).length === 0 ? <div className="socios-muted-box">No hay cuotas ni servicios vigentes para esta fecha y sede.</div> : <div className="cobros-table-wrap"><table className="table">
         <thead><tr><th>Concepto</th><th>Operaciones</th><th>Efectivo</th><th>Pago virtual</th><th>Total</th></tr></thead>
         <tbody>{Object.entries(byConcept).map(([concept, value]) => <tr key={concept}><td>{centerConceptLabel(centerId, concept as AdministrativePayment["items"][number]["concept"])}</td><td>{value.count}</td><td>{money(value.cash)}</td><td>{money(value.virtual)}</td><td><strong>{money(value.total)}</strong></td></tr>)}</tbody>
       </table></div>}

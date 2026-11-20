@@ -33,12 +33,15 @@ import { useAuth } from "../state/AuthContext";
 import { Card } from "../ui/Card";
 import {
   ADMINISTRATIVE_PRICE_VALIDITY,
-  administrativePrice,
+  administrativePriceQuote,
+  administrativeRangePrice,
   CENTER_CONCEPTS,
   CENTER_LABELS,
   centerConceptLabel,
 } from "../lib/centers";
 import type { CenterId } from "../lib/centers";
+import { residencyLabel } from "../lib/members";
+import type { ResidencyStatus } from "../lib/members";
 import CobrosRendicion from "./CobrosRendicion";
 import { listenAdministrativeClosure } from "../lib/administrativeClosures";
 import type { AdministrativeClosure } from "../lib/administrativeClosures";
@@ -47,6 +50,7 @@ type MemberOption = {
   dni: string;
   firstName: string;
   lastName: string;
+  residencyStatus: ResidencyStatus;
 };
 
 type FormState = {
@@ -87,6 +91,7 @@ function currentPoolSeason() {
 }
 
 function blankForm(): FormState {
+  const currentMonth = administrativeTodayKey().slice(0, 7);
   return {
     enabled: {
       BONO_CONTRIBUCION: false,
@@ -99,12 +104,12 @@ function blankForm(): FormState {
     },
     contributionType: "CUOTA",
     contributionAmount: "",
-    contributionStart: "",
-    contributionEnd: "",
+    contributionStart: currentMonth,
+    contributionEnd: currentMonth,
     lockerAmount: "",
     lockerNumber: "",
-    lockerStart: "",
-    lockerEnd: "",
+    lockerStart: currentMonth,
+    lockerEnd: addMonths(currentMonth, 3),
     guestAmount: "",
     guestName: "",
     guestDni: "",
@@ -117,11 +122,18 @@ function blankForm(): FormState {
     activityRegistrationAmount: "",
     activityOneAmount: "",
     activityTwoAmount: "",
-    activityPeriod: administrativeTodayKey().slice(0, 7),
+    activityPeriod: currentMonth,
     paymentMethod: "EFECTIVO",
     receiptNumber: "",
     notes: "",
   };
+}
+
+function addMonths(monthKey: string, amount: number) {
+  const match = monthKey.match(/^(\d{4})-(\d{2})$/);
+  if (!match) return monthKey;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1 + amount, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
 function memberName(member: MemberOption) {
@@ -198,28 +210,67 @@ function monthlyPeriod(monthKey: string) {
   };
 }
 
-function applyCatalogPrices(form: FormState, centerId: CenterId, paymentMethod: AdministrativePaymentMethod) {
-  const price = (concept: AdministrativeConcept, detail: string) => administrativePrice({
+function quoteAmount(
+  quote: ReturnType<typeof administrativePriceQuote>,
+  currentValue: string,
+) {
+  if (quote.status === "PRICED" && quote.amount != null) return String(quote.amount);
+  if (quote.status === "UNAVAILABLE") return "";
+  return currentValue;
+}
+
+function poolPriceMonth(form: FormState) {
+  const period = poolPeriod(form.poolSeason, form.poolSeasonType, form.poolMonth);
+  if (!period) return administrativeTodayKey().slice(0, 7);
+  return form.poolSeasonType === "TEMPORADA_COMPLETA"
+    ? `${period.end.slice(0, 4)}-01`
+    : period.start.slice(0, 7);
+}
+
+function applyCatalogPrices(
+  form: FormState,
+  centerId: CenterId,
+  paymentMethod: AdministrativePaymentMethod,
+  residencyStatus: ResidencyStatus,
+) {
+  const quote = (concept: AdministrativeConcept, detail: string, monthKey: string) => administrativePriceQuote({
     centerId,
     concept,
     detail,
     paymentMethod,
+    monthKey,
+    residencyStatus,
   });
-  const contribution = price("BONO_CONTRIBUCION", form.contributionType);
-  const locker = price("LOCKER", "ALQUILER");
-  const guest = price("INVITADO", "INGRESO");
-  const registration = price("INSCRIPCION_ACTIVIDADES", "INSCRIPCION");
-  const activityOne = price("ACTIVIDAD_1_SEMANAL", "ACTIVIDAD");
-  const activityTwo = price("ACTIVIDAD_2_SEMANAL", "ACTIVIDAD");
+  const currentMonth = administrativeTodayKey().slice(0, 7);
+  const contribution = form.contributionType === "CUOTA"
+    ? administrativeRangePrice({
+      centerId,
+      concept: "BONO_CONTRIBUCION",
+      detail: "CUOTA",
+      paymentMethod,
+      from: form.contributionStart,
+      to: form.contributionEnd,
+      residencyStatus,
+    })
+    : quote("BONO_CONTRIBUCION", form.contributionType, currentMonth);
+  const locker = quote("LOCKER", "ALQUILER", form.lockerStart || currentMonth);
+  const guest = quote("INVITADO", "INGRESO", form.guestVisitDate.slice(0, 7) || currentMonth);
+  const registration = quote("INSCRIPCION_ACTIVIDADES", "INSCRIPCION", currentMonth);
+  const activityOne = quote("ACTIVIDAD_1_SEMANAL", "ACTIVIDAD", form.activityPeriod || currentMonth);
+  const activityTwo = quote("ACTIVIDAD_2_SEMANAL", "ACTIVIDAD", form.activityPeriod || currentMonth);
+  const pool = quote("PILETA", form.poolSeasonType, poolPriceMonth(form));
   return {
     ...form,
     paymentMethod,
-    contributionAmount: contribution == null ? form.contributionAmount : String(contribution),
-    lockerAmount: locker == null ? form.lockerAmount : String(locker),
-    guestAmount: guest == null ? form.guestAmount : String(guest),
-    activityRegistrationAmount: registration == null ? form.activityRegistrationAmount : String(registration),
-    activityOneAmount: activityOne == null ? form.activityOneAmount : String(activityOne),
-    activityTwoAmount: activityTwo == null ? form.activityTwoAmount : String(activityTwo),
+    contributionAmount: contribution.status === "PRICED" && contribution.amount != null
+      ? String(contribution.amount)
+      : form.contributionAmount,
+    lockerAmount: quoteAmount(locker, form.lockerAmount),
+    guestAmount: quoteAmount(guest, form.guestAmount),
+    poolAmount: quoteAmount(pool, form.poolAmount),
+    activityRegistrationAmount: quoteAmount(registration, form.activityRegistrationAmount),
+    activityOneAmount: quoteAmount(activityOne, form.activityOneAmount),
+    activityTwoAmount: quoteAmount(activityTwo, form.activityTwoAmount),
   };
 }
 
@@ -285,6 +336,36 @@ export default function Cobros() {
     return listenMemberAdministrativePayments(selectedMember.dni, centerId, setMemberPayments);
   }, [selectedMember, centerId]);
 
+  const pricingResidency = selectedMember?.residencyStatus ?? "SIN_VERIFICAR";
+  const pricingTrigger = [
+    ...Object.entries(form.enabled).map(([concept, enabled]) => `${concept}:${enabled}`),
+    form.paymentMethod,
+    form.contributionType,
+    form.contributionStart,
+    form.contributionEnd,
+    form.lockerStart,
+    form.guestVisitDate,
+    form.poolSeason,
+    form.poolSeasonType,
+    form.poolMonth,
+    form.activityPeriod,
+  ].join("|");
+
+  useEffect(() => {
+    void pricingTrigger;
+    setForm((current) => {
+      const priced = applyCatalogPrices(current, centerId, current.paymentMethod, pricingResidency);
+      const unchanged = priced.contributionAmount === current.contributionAmount
+        && priced.lockerAmount === current.lockerAmount
+        && priced.guestAmount === current.guestAmount
+        && priced.poolAmount === current.poolAmount
+        && priced.activityRegistrationAmount === current.activityRegistrationAmount
+        && priced.activityOneAmount === current.activityOneAmount
+        && priced.activityTwoAmount === current.activityTwoAmount;
+      return unchanged ? current : priced;
+    });
+  }, [centerId, pricingResidency, pricingTrigger]);
+
   const activeToday = useMemo(() => todayPayments.filter((payment) => payment.status !== "VOID"), [todayPayments]);
   const totals = useMemo(() => ({
     total: activeToday.reduce((sum, payment) => sum + Number(payment.totalAmount || 0), 0),
@@ -300,6 +381,14 @@ export default function Cobros() {
     + (form.enabled.ACTIVIDAD_1_SEMANAL ? numericAmount(form.activityOneAmount) : 0)
     + (form.enabled.ACTIVIDAD_2_SEMANAL ? numericAmount(form.activityTwoAmount) : 0)
   ), [form]);
+  const guestUnavailable = administrativePriceQuote({
+    centerId,
+    concept: "INVITADO",
+    detail: "INGRESO",
+    paymentMethod: form.paymentMethod,
+    monthKey: form.guestVisitDate.slice(0, 7),
+    residencyStatus: pricingResidency,
+  }).status === "UNAVAILABLE";
 
   function selectMember(member: MemberOption) {
     setSelectedMember(member);
@@ -327,6 +416,9 @@ export default function Cobros() {
           dni,
           firstName: String(data.firstName ?? data.name ?? ""),
           lastName: String(data.lastName ?? ""),
+          residencyStatus: data.residencyStatus === "SAN_ISIDRO" || data.residencyStatus === "FUERA_SAN_ISIDRO"
+            ? data.residencyStatus
+            : "SIN_VERIFICAR",
         });
         return;
       }
@@ -347,6 +439,9 @@ export default function Cobros() {
           dni: item.id,
           firstName: String(data.firstName ?? data.name ?? ""),
           lastName: String(data.lastName ?? ""),
+          residencyStatus: data.residencyStatus === "SAN_ISIDRO" || data.residencyStatus === "FUERA_SAN_ISIDRO"
+            ? data.residencyStatus
+            : "SIN_VERIFICAR",
         });
       }));
       const list = Array.from(found.values()).slice(0, 12);
@@ -360,29 +455,34 @@ export default function Cobros() {
   }
 
   function toggleConcept(concept: AdministrativeConcept) {
-    setForm((current) => applyCatalogPrices({
+    setForm((current) => ({
       ...current,
       enabled: { ...current.enabled, [concept]: !current.enabled[concept] },
-    }, centerId, current.paymentMethod));
+    }));
     setMessage("");
   }
 
   function buildItems() {
     const items: AdministrativePaymentItem[] = [];
     if (!availableConcepts.some((concept) => form.enabled[concept])) {
-      throw new Error("Seleccioná al menos un concepto de cobro.");
+      throw new Error("Seleccioná al menos un concepto de cuota o servicio.");
     }
 
     if (form.enabled.BONO_CONTRIBUCION) {
       if (form.contributionType === "CUOTA" && (!form.contributionStart || !form.contributionEnd)) {
         throw new Error("Indicá desde y hasta cuándo cubre el bono contribución.");
       }
+      const contributionStart = form.contributionType === "CUOTA" ? monthlyPeriod(form.contributionStart) : null;
+      const contributionEnd = form.contributionType === "CUOTA" ? monthlyPeriod(form.contributionEnd) : null;
+      if (form.contributionType === "CUOTA" && (!contributionStart || !contributionEnd || form.contributionStart > form.contributionEnd)) {
+        throw new Error("El período del bono contribución debe tener meses válidos y Desde no puede ser posterior a Hasta.");
+      }
       items.push({
         concept: "BONO_CONTRIBUCION",
         amount: requiredAmount(form.contributionAmount, "bono contribución"),
         detail: form.contributionType,
-        periodStart: form.contributionType === "CUOTA" ? form.contributionStart : null,
-        periodEnd: form.contributionType === "CUOTA" ? form.contributionEnd : null,
+        periodStart: contributionStart?.start ?? null,
+        periodEnd: contributionEnd?.end ?? null,
         lockerNumber: null,
         guest: null,
         pool: null,
@@ -393,12 +493,17 @@ export default function Cobros() {
       if (!form.lockerNumber.trim() || !form.lockerStart || !form.lockerEnd) {
         throw new Error("Indicá el número de locker y su período de alquiler.");
       }
+      const lockerStart = monthlyPeriod(form.lockerStart);
+      const lockerEnd = monthlyPeriod(form.lockerEnd);
+      if (!lockerStart || !lockerEnd || form.lockerStart > form.lockerEnd) {
+        throw new Error("El período del locker debe tener meses válidos y Desde no puede ser posterior a Hasta.");
+      }
       items.push({
         concept: "LOCKER",
         amount: requiredAmount(form.lockerAmount, "locker"),
         detail: "ALQUILER",
-        periodStart: form.lockerStart,
-        periodEnd: form.lockerEnd,
+        periodStart: lockerStart.start,
+        periodEnd: lockerEnd.end,
         lockerNumber: form.lockerNumber.trim(),
         guest: null,
         pool: null,
@@ -406,6 +511,9 @@ export default function Cobros() {
     }
 
     if (form.enabled.INVITADO) {
+      if (guestUnavailable) {
+        throw new Error("El tarifario indica que Invitados no está disponible para socios con domicilio fuera del partido.");
+      }
       const guestDni = form.guestDni.replace(/\D/g, "");
       if (!form.guestName.trim() || !form.guestVisitDate) {
         throw new Error("Indicá el nombre y la fecha de visita del invitado.");
@@ -506,7 +614,12 @@ export default function Cobros() {
       const items = buildItems();
       const totalAmount = items.reduce((sum, item) => sum + item.amount, 0);
       await createAdministrativePayment({
-        member: selectedMember,
+        member: {
+          dni: selectedMember.dni,
+          firstName: selectedMember.firstName,
+          lastName: selectedMember.lastName,
+        },
+        pricingResidency: selectedMember.residencyStatus,
         centerId,
         items,
         totalAmount,
@@ -516,7 +629,7 @@ export default function Cobros() {
         operator: actor,
       });
       setForm(blankForm());
-      setMessage(`✅ Cobro por ${money(totalAmount)} registrado con ${items.length} concepto${items.length === 1 ? "" : "s"}.`);
+      setMessage(`✅ Cuota y servicio por ${money(totalAmount)} registrado con ${items.length} concepto${items.length === 1 ? "" : "s"}.`);
     } catch (error: unknown) {
       setMessage(errorMessage(error));
     } finally {
@@ -536,7 +649,7 @@ export default function Cobros() {
 
   return <div className="cobros-page">
     <div className="cobros-heading">
-      <div><h1>Cobros</h1><p>Registro y rendición de cobros administrativos por sede.</p></div>
+      <div><h1>Cuotas y Servicios</h1><p>Registro y rendición de cuotas y servicios por sede.</p></div>
       <div className="cobros-center-control">
         <label><span>Sede activa</span>{allowedCenters.length > 1 ? <select className="input" value={centerId} onChange={(event) => setCenterId(event.target.value as CenterId)}>{allowedCenters.map((item) => <option key={item} value={item}>{CENTER_LABELS[item]}</option>)}</select> : <strong>{CENTER_LABELS[centerId]}</strong>}</label>
         {!canWrite && <span className="badge">Solo consulta</span>}
@@ -544,11 +657,11 @@ export default function Cobros() {
     </div>
 
     <div className="cobros-view-tabs">
-      <button className={activeView === "COBRAR" ? "active" : ""} onClick={() => setActiveView("COBRAR")}>Registrar cobros</button>
+      <button className={activeView === "COBRAR" ? "active" : ""} onClick={() => setActiveView("COBRAR")}>Registrar cuotas y servicios</button>
       <button className={activeView === "RENDICION" ? "active" : ""} onClick={() => setActiveView("RENDICION")}>Rendición</button>
     </div>
 
-    {activeView === "COBRAR" ? <>{todayClosure && <div className="socios-message info">La rendición de hoy ya fue cerrada para {CENTER_LABELS[centerId]}. Los cobros y anulaciones quedaron bloqueados.</div>}<div className="cobros-summary">
+    {activeView === "COBRAR" ? <>{todayClosure && <div className="socios-message info">La rendición de hoy ya fue cerrada para {CENTER_LABELS[centerId]}. Los registros y anulaciones quedaron bloqueados.</div>}<div className="cobros-summary">
       <div className="socios-stat"><span>Comprobantes de hoy</span><strong>{activeToday.length}</strong></div>
       <div className="socios-stat ok"><span>Total cobrado</span><strong>{money(totals.total)}</strong></div>
       <div className="socios-stat"><span>Efectivo</span><strong>{money(totals.cash)}</strong></div>
@@ -564,14 +677,16 @@ export default function Cobros() {
           </form>
           {searchError && <div className="socios-message error cobros-message">{searchError}</div>}
           {candidates.length > 0 && <div className="cobros-candidates">{candidates.map((member) => <button type="button" key={member.dni} onClick={() => selectMember(member)}><strong>{memberName(member)}</strong><span>DNI {member.dni}</span></button>)}</div>}
-          {selectedMember && <div className="cobros-selected"><span>Socio seleccionado</span><strong>{memberName(selectedMember)}</strong><small>DNI {selectedMember.dni}</small></div>}
+          {selectedMember && <div className="cobros-selected"><span>Socio seleccionado</span><strong>{memberName(selectedMember)}</strong><small>DNI {selectedMember.dni} · {residencyLabel(selectedMember.residencyStatus)}</small></div>}
+          {selectedMember?.residencyStatus === "SIN_VERIFICAR" && <div className="socios-message info cobros-message">El domicilio todavía no está verificado. Se aplican los valores generales hasta que se actualice la ficha del socio.</div>}
+          {selectedMember?.residencyStatus === "FUERA_SAN_ISIDRO" && <div className="socios-message info cobros-message">Se aplican los valores para socios con domicilio fuera del partido. Los conceptos sin arancel diferencial conservan el valor general.</div>}
         </Card>
 
         <Card title="2) Conceptos e importes">
           <form className="cobros-form" onSubmit={submitPayment}>
             <div className="cobros-concept-options">
               {availableConcepts.map((concept) => <label key={concept} className={`cobros-concept-check ${form.enabled[concept] ? "active" : ""}`}>
-                <input type="checkbox" checked={form.enabled[concept]} onChange={() => toggleConcept(concept)} />
+                <input type="checkbox" checked={form.enabled[concept]} disabled={concept === "INVITADO" && guestUnavailable && !form.enabled[concept]} onChange={() => toggleConcept(concept)} />
                 <span>{centerConceptLabel(centerId, concept)}</span>
               </label>)}
             </div>
@@ -581,20 +696,21 @@ export default function Cobros() {
               <div className="cobros-two-cols">
                 <label><span>Tipo</span><select className="input" value={form.contributionType} onChange={(event) => {
                   const contributionType = event.target.value as FormState["contributionType"];
-                  setForm((current) => applyCatalogPrices({ ...current, contributionType }, centerId, current.paymentMethod));
+                  setForm((current) => ({ ...current, contributionType }));
                 }}><option value="CUOTA">{centerId === "ANEXO_19" ? "Cuota social" : "Bono contribución"}</option>{centerId === "PUERTO_LIBRE" && <><option value="INSCRIPCION">Inscripción</option><option value="REINCORPORACION">Reincorporación</option></>}</select></label>
                 <label><span>Importe</span><input type="number" min="0" step="0.01" className="input" value={form.contributionAmount} onChange={(event) => setForm({ ...form, contributionAmount: event.target.value })} /></label>
               </div>
-              {form.contributionType === "CUOTA" && <div className="cobros-two-cols"><label><span>Desde</span><input type="date" className="input" value={form.contributionStart} onChange={(event) => setForm({ ...form, contributionStart: event.target.value })} /></label><label><span>Hasta</span><input type="date" className="input" value={form.contributionEnd} onChange={(event) => setForm({ ...form, contributionEnd: event.target.value })} /></label></div>}
+              {form.contributionType === "CUOTA" && <div className="cobros-two-cols"><label><span>Desde (mes/año)</span><input type="month" className="input" value={form.contributionStart} onChange={(event) => setForm({ ...form, contributionStart: event.target.value })} /></label><label><span>Hasta (mes/año)</span><input type="month" className="input" value={form.contributionEnd} onChange={(event) => setForm({ ...form, contributionEnd: event.target.value })} /></label></div>}
             </section>}
 
             {form.enabled.LOCKER && <section className="cobros-concept-panel">
               <h3>Locker</h3>
-              <div className="cobros-two-cols"><label><span>Número de locker</span><input className="input" value={form.lockerNumber} onChange={(event) => setForm({ ...form, lockerNumber: event.target.value })} placeholder="Ej. 173" /></label><label><span>Importe</span><input type="number" min="0" step="0.01" className="input" value={form.lockerAmount} onChange={(event) => setForm({ ...form, lockerAmount: event.target.value })} /></label><label><span>Desde</span><input type="date" className="input" value={form.lockerStart} onChange={(event) => setForm({ ...form, lockerStart: event.target.value })} /></label><label><span>Hasta</span><input type="date" className="input" value={form.lockerEnd} onChange={(event) => setForm({ ...form, lockerEnd: event.target.value })} /></label></div>
+              <div className="cobros-two-cols"><label><span>Número de locker</span><input className="input" value={form.lockerNumber} onChange={(event) => setForm({ ...form, lockerNumber: event.target.value })} placeholder="Ej. 173" /></label><label><span>Importe</span><input type="number" min="0" step="0.01" className="input" value={form.lockerAmount} onChange={(event) => setForm({ ...form, lockerAmount: event.target.value })} /></label><label><span>Desde (mes/año)</span><input type="month" className="input" value={form.lockerStart} onChange={(event) => setForm({ ...form, lockerStart: event.target.value })} /></label><label><span>Hasta (mes/año)</span><input type="month" className="input" value={form.lockerEnd} onChange={(event) => setForm({ ...form, lockerEnd: event.target.value })} /></label></div>
             </section>}
 
             {form.enabled.INVITADO && <section className="cobros-concept-panel">
               <h3>Invitado</h3>
+              {guestUnavailable && <div className="socios-message error cobros-message">El tarifario no permite Invitados para socios de fuera del partido en el mes seleccionado.</div>}
               <div className="cobros-two-cols"><label><span>Nombre del invitado</span><input className="input" value={form.guestName} onChange={(event) => setForm({ ...form, guestName: event.target.value })} /></label><label><span>DNI del invitado (opcional)</span><input className="input" inputMode="numeric" value={form.guestDni} onChange={(event) => setForm({ ...form, guestDni: event.target.value })} /></label><label><span>Fecha de visita</span><input type="date" className="input" value={form.guestVisitDate} onChange={(event) => setForm({ ...form, guestVisitDate: event.target.value })} /></label><label><span>Importe</span><input type="number" min="0" step="0.01" className="input" value={form.guestAmount} onChange={(event) => setForm({ ...form, guestAmount: event.target.value })} /></label></div>
             </section>}
 
@@ -623,21 +739,21 @@ export default function Cobros() {
 
             <section className="cobros-payment-panel">
               <h3>Comprobante y pago</h3>
-              <div className="cobros-rate-note">Aranceles sugeridos vigentes de {ADMINISTRATIVE_PRICE_VALIDITY.label}. Pileta permanece editable porque no figura en el tarifario.</div>
-              <div className="cobros-two-cols"><label><span>Medio de pago</span><select className="input" value={form.paymentMethod} onChange={(event) => setForm((current) => applyCatalogPrices(current, centerId, event.target.value as AdministrativePaymentMethod))}><option value="EFECTIVO">Efectivo</option><option value="MP">Pago virtual</option></select></label><label><span>Número de recibo / comprobante</span><input className="input" value={form.receiptNumber} onChange={(event) => setForm({ ...form, receiptNumber: event.target.value })} /></label></div>
+              <div className="cobros-rate-note">Aranceles cargados para {ADMINISTRATIVE_PRICE_VALIDITY.label}. En períodos que atraviesan un cambio de arancel, cada mes se suma con su valor vigente. Los importes siguen editables para contemplar excepciones autorizadas.</div>
+              <div className="cobros-two-cols"><label><span>Medio de pago</span><select className="input" value={form.paymentMethod} onChange={(event) => setForm({ ...form, paymentMethod: event.target.value as AdministrativePaymentMethod })}><option value="EFECTIVO">Efectivo</option><option value="MP">Pago virtual</option></select></label><label><span>Número de recibo / comprobante</span><input className="input" value={form.receiptNumber} onChange={(event) => setForm({ ...form, receiptNumber: event.target.value })} /></label></div>
               <label><span>Observaciones</span><textarea rows={2} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>
               <div className="cobros-form-total"><span>Total del comprobante</span><strong>{money(formTotal)}</strong></div>
             </section>
 
             {message && <div className={`socios-message ${message.startsWith("✅") ? "success" : "error"}`}>{message}</div>}
-            <button className="button" disabled={!canWrite || saving || !selectedMember || formTotal <= 0 || Boolean(todayClosure)}>{saving ? "Guardando..." : `Registrar cobro por ${money(formTotal)}`}</button>
+            <button className="button" disabled={!canWrite || saving || !selectedMember || formTotal <= 0 || Boolean(todayClosure)}>{saving ? "Guardando..." : `Registrar cuota y servicio por ${money(formTotal)}`}</button>
           </form>
         </Card>
       </div>
 
       <div className="grid">
         <PaymentTable title={selectedMember ? `Historial de ${memberName(selectedMember)}` : "Historial del socio"} payments={memberPayments} empty="Seleccioná un socio para corroborar sus pagos." canVoid={canWrite && !todayClosure} onVoid={voidPayment} />
-        <PaymentTable title={`Movimientos de hoy · ${administrativeTodayKey()}`} payments={todayPayments} empty="Todavía no se registraron cobros administrativos hoy." canVoid={canWrite && !todayClosure} onVoid={voidPayment} />
+        <PaymentTable title={`Movimientos de hoy · ${administrativeTodayKey()}`} payments={todayPayments} empty="Todavía no se registraron cuotas ni servicios hoy." canVoid={canWrite && !todayClosure} onVoid={voidPayment} />
       </div>
     </div></> : <CobrosRendicion centerId={centerId} canClose={canWrite} />}
   </div>;
@@ -657,7 +773,7 @@ function PaymentTable({ title, payments, empty, canVoid, onVoid }: {
         <td>{dateTime(payment.createdAt)}</td>
         <td><div className="cobros-item-concepts">{payment.items.map((item) => <span className="socios-pill info" key={item.concept}>{centerConceptLabel(payment.centerId, item.concept)}</span>)}</div></td>
         <td><div className="cobros-item-details">{payment.items.map((item) => <div key={item.concept}><span>{administrativeItemPeriod(item)}</span><strong>{money(item.amount)}</strong></div>)}</div></td>
-        <td>{payment.receiptNumber}</td>
+        <td><div>{payment.receiptNumber}</div>{payment.pricingResidency && <small>{residencyLabel(payment.pricingResidency)}</small>}</td>
         <td>{payment.paymentMethod === "MP" ? "Pago virtual" : "Efectivo"}</td>
         <td>{money(Number(payment.totalAmount || 0))}</td>
         <td>{payment.status === "VOID" ? <span className="socios-pill danger">Anulado</span> : <span className="socios-pill ok">Vigente</span>}</td>

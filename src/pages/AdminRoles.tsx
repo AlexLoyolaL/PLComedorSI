@@ -34,7 +34,7 @@ function AdminRolesInner() {
       return;
     }
     if (targetRole === "cobrador" && selectedCenters.length === 0) {
-      setMsg({ text: "Seleccioná al menos una sede para el perfil de Cobros.", type: "error" });
+      setMsg({ text: "Seleccioná al menos una sede para el perfil de Cuotas y Servicios.", type: "error" });
       return;
     }
 
@@ -95,7 +95,7 @@ function AdminRolesInner() {
         text: targetRole === "remover" 
           ? `Acceso removido completamente para ${cleanEmail}` 
           : targetRole === "cobrador"
-            ? `Acceso a Cobros asignado para: ${selectedCenters.map((centerId) => CENTER_LABELS[centerId]).join(", ")}. Ya puede recargar la página.`
+            ? `Acceso a Cuotas y Servicios asignado para: ${selectedCenters.map((centerId) => CENTER_LABELS[centerId]).join(", ")}. Ya puede recargar la página.`
             : `Rol '${targetRole}' asignado. Ya pueden recargar la página y entrar.`,
         type: "success" 
       });
@@ -147,7 +147,7 @@ function AdminRolesInner() {
               style={{ width: "100%" }}
             >
               <option value="administrativo">Administrativo (Caja y Rendición)</option>
-              <option value="cobrador">Cobros por sede (solo Cobros y su rendición)</option>
+              <option value="cobrador">Cuotas y Servicios por sede (incluye rendición)</option>
               <option value="administrador">Administrador (Gestión de stock manual)</option>
               <option value="cocina">Cocina (Solo lectura monitor)</option>
               <option value="gabinete">Gabinete Social (Gestión de padrón)</option>

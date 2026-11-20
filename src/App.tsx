@@ -120,7 +120,7 @@ export default function App() {
 
         {canSeeCobros && (
           <button className={`tab ${tab === "cobros" ? "active" : ""}`} onClick={() => setTab("cobros")}>
-            Cobros
+            Cuotas y Servicios
           </button>
         )}
 

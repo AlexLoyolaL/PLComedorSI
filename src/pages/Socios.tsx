@@ -3,7 +3,6 @@ import {
   collection,
   doc,
   documentId,
-  endAt,
   getCountFromServer,
   getDoc,
   getDocs,
@@ -11,12 +10,11 @@ import {
   orderBy,
   query,
   serverTimestamp,
-  startAt,
   startAfter,
   where,
   writeBatch,
 } from "firebase/firestore";
-import type { DocumentData } from "firebase/firestore";
+import type { DocumentData, QueryConstraint } from "firebase/firestore";
 import * as XLSX from "xlsx";
 import { db } from "../firebase";
 import { emptyMemberProfile, isMemberAlertActive, memberProfileFromData, residencyLabel } from "../lib/members";
@@ -31,12 +29,21 @@ import type { AdministrativePayment } from "../lib/administrativePayments";
 import { CENTER_LABELS } from "../lib/centers";
 
 const PAGE_SIZE = 20;
+const FILTER_SCAN_SIZE = 30;
+const FAST_FILTER_SCAN_SIZE = 200;
 const SOURCE_PAGE_SIZE = { members: 7, subsidized: 7, sales: 6 } as const;
 const PURE_DNI_RE = /^\d{7,8}$/;
 
 type BenefitFilter = "TODOS" | "SUBVENCIONADO" | "LOTE" | "SIN_BENEFICIO";
 type ProfileFilter = "TODAS" | MemberProfile["profileStatus"];
 type OriginFilter = "TODOS" | MemberOrigin;
+type ResidencyFilter = "TODAS" | ResidencyStatus;
+type ListQueryFilters = {
+  profile: ProfileFilter;
+  residency: ResidencyFilter;
+  benefit: BenefitFilter;
+  search: string;
+};
 
 type PurchaseSummary = {
   total: number;
@@ -119,6 +126,10 @@ let cachedHasMore = true;
 let cachedCounts: SourceCounts = { members: null, subsidized: null, salesToday: null };
 let cachedAt: Date | null = null;
 let cachedOriginFilter: OriginFilter = "TODOS";
+let cachedProfileFilter: ProfileFilter = "TODAS";
+let cachedResidencyFilter: ResidencyFilter = "TODAS";
+let cachedBenefitFilter: BenefitFilter = "TODOS";
+let cachedSearch = "";
 
 function todayKey() {
   const date = new Date();
@@ -173,6 +184,54 @@ function hasActiveSubsidy(row: MemberRow) {
 function hasActiveBundle(row: MemberRow) {
   const bundle = row.memberData?.active_bundle;
   return Boolean(Number(bundle?.remaining) > 0 && isFutureOrToday(bundle?.expiresAt));
+}
+
+function rowMatchesListQuery(row: MemberRow, filters: ListQueryFilters) {
+  if (filters.profile !== "TODAS" && row.profile.profileStatus !== filters.profile) return false;
+  if (filters.residency !== "TODAS" && row.profile.residencyStatus !== filters.residency) return false;
+  if (filters.benefit === "SUBVENCIONADO" && !hasActiveSubsidy(row)) return false;
+  if (filters.benefit === "LOTE" && !hasActiveBundle(row)) return false;
+  if (filters.benefit === "SIN_BENEFICIO" && (hasActiveSubsidy(row) || hasActiveBundle(row))) return false;
+
+  const normalizedTerm = normalizedNameSearch(filters.search).toLocaleLowerCase("es");
+  const terms = normalizedTerm.split(" ").filter(Boolean);
+  if (!terms.length) return true;
+  const activeAlert = isMemberAlertActive(row.alert, todayKey());
+  const searchable = [
+    row.dni,
+    row.profile.firstName,
+    row.profile.lastName,
+    row.profile.birthDate,
+    row.profile.address.street,
+    row.profile.address.number,
+    row.profile.address.locality,
+    row.qrCodes.join(" "),
+    activeAlert ? row.alert?.message : "",
+  ].join(" ").toLocaleLowerCase("es");
+  return terms.every((term) => searchable.includes(term));
+}
+
+function memberDocumentMatchesBasic(snapshot: MemberDocument, filters: ListQueryFilters) {
+  const data = snapshot.data() ?? {};
+  const profile = memberProfileFromData(snapshot.id, data);
+  if (filters.profile !== "TODAS" && profile.profileStatus !== filters.profile) return false;
+  if (filters.residency !== "TODAS" && profile.residencyStatus !== filters.residency) return false;
+  if (filters.benefit === "LOTE") {
+    const bundle = data.active_bundle;
+    if (!(Number(bundle?.remaining) > 0 && isFutureOrToday(bundle?.expiresAt))) return false;
+  }
+  const terms = normalizedNameSearch(filters.search).toLocaleLowerCase("es").split(" ").filter(Boolean);
+  if (!terms.length) return true;
+  const searchable = [
+    snapshot.id,
+    profile.firstName,
+    profile.lastName,
+    profile.birthDate,
+    profile.address.street,
+    profile.address.number,
+    profile.address.locality,
+  ].join(" ").toLocaleLowerCase("es");
+  return terms.every((term) => searchable.includes(term));
 }
 
 function displayName(row: MemberRow) {
@@ -337,12 +396,11 @@ export default function Socios() {
   const [hasMore, setHasMore] = useState(cachedHasMore);
   const [counts, setCounts] = useState<SourceCounts>(cachedCounts);
   const [selectedDni, setSelectedDni] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [globalSearchDnis, setGlobalSearchDnis] = useState<string[]>([]);
-  const [globalSearchTerm, setGlobalSearchTerm] = useState("");
-  const [profileFilter, setProfileFilter] = useState<ProfileFilter>("TODAS");
-  const [residencyFilter, setResidencyFilter] = useState<"TODAS" | ResidencyStatus>("TODAS");
-  const [benefitFilter, setBenefitFilter] = useState<BenefitFilter>("TODOS");
+  const [search, setSearch] = useState(cachedSearch);
+  const [globalSearchTerm, setGlobalSearchTerm] = useState(cachedSearch);
+  const [profileFilter, setProfileFilter] = useState<ProfileFilter>(cachedProfileFilter);
+  const [residencyFilter, setResidencyFilter] = useState<ResidencyFilter>(cachedResidencyFilter);
+  const [benefitFilter, setBenefitFilter] = useState<BenefitFilter>(cachedBenefitFilter);
   const [originFilter, setOriginFilter] = useState<OriginFilter>(cachedOriginFilter);
   const [loading, setLoading] = useState(cachedRows === null);
   const [error, setError] = useState("");
@@ -356,12 +414,23 @@ export default function Socios() {
   const loadRequestRef = useRef(0);
   const dniSearchTimerRef = useRef<number | null>(null);
 
-  function commitCache(nextRows: MemberRow[], nextCursors: SourceCursors, nextHasMore: boolean, nextCounts: SourceCounts, mode: OriginFilter = originFilter) {
+  function commitCache(
+    nextRows: MemberRow[],
+    nextCursors: SourceCursors,
+    nextHasMore: boolean,
+    nextCounts: SourceCounts,
+    mode: OriginFilter = originFilter,
+    listFilters: ListQueryFilters = { profile: profileFilter, residency: residencyFilter, benefit: benefitFilter, search: globalSearchTerm },
+  ) {
     cachedRows = nextRows;
     cachedCursors = nextCursors;
     cachedHasMore = nextHasMore;
     cachedCounts = nextCounts;
     cachedOriginFilter = mode;
+    cachedProfileFilter = listFilters.profile;
+    cachedResidencyFilter = listFilters.residency;
+    cachedBenefitFilter = listFilters.benefit;
+    cachedSearch = listFilters.search;
     cachedAt = new Date();
     setRows(nextRows);
     setCursors(nextCursors);
@@ -386,6 +455,8 @@ export default function Socios() {
         firstName,
         name: firstName,
         lastName,
+        residencyStatus: "SIN_VERIFICAR" as const,
+        profileStatus: "INCOMPLETO" as const,
         createdAt: serverTimestamp(),
         createdBy: actor,
         updatedAt: serverTimestamp(),
@@ -433,14 +504,20 @@ export default function Socios() {
     };
   }
 
-  async function loadMembers(reset = false, mode: OriginFilter = originFilter, refreshCounts = false) {
+  async function loadMembers(
+    reset = false,
+    mode: OriginFilter = originFilter,
+    refreshCounts = false,
+    listFilters: ListQueryFilters = { profile: profileFilter, residency: residencyFilter, benefit: benefitFilter, search: globalSearchTerm },
+  ) {
     if (loading && !reset) return;
     const requestId = ++loadRequestRef.current;
     setLoading(true);
+    if (reset) setRows([]);
     setError("");
     try {
       const current = reset ? { members: null, subsidized: null, sales: null } : cursors;
-      const pageQuery = (collectionName: string, after: string | null, size: number, constraints: any[] = []) => query(
+      const pageQuery = (collectionName: string, after: string | null, size: number, constraints: QueryConstraint[] = []) => query(
         collection(db, collectionName),
         ...constraints,
         orderBy(documentId()),
@@ -450,48 +527,119 @@ export default function Socios() {
       const memberPageSize = mode === "TODOS" ? SOURCE_PAGE_SIZE.members : mode === "MEMBERS" ? PAGE_SIZE : 0;
       const subsidizedPageSize = mode === "TODOS" ? SOURCE_PAGE_SIZE.subsidized : mode === "SUBSIDIZED" ? PAGE_SIZE : 0;
       const salesPageSize = mode === "TODOS" ? SOURCE_PAGE_SIZE.sales : mode === "SALE_TODAY" ? PAGE_SIZE : 0;
-      const todaySales = salesPageSize ? query(
-        collection(db, "sales"),
-        where("dateKey", "==", todayKey()),
-        orderBy(documentId()),
-        ...(current.sales ? [startAfter(current.sales)] : []),
-        limit(salesPageSize),
-      ) : null;
+      const memberConstraints: QueryConstraint[] = [];
+      // Los documentos antiguos pueden no tener estos campos. Solo se empujan al servidor
+      // los filtros que no excluirían fichas antiguas válidas; el resto se valida al hidratar.
+      if (listFilters.profile === "COMPLETO") {
+        memberConstraints.push(where("profileStatus", "==", "COMPLETO"));
+      } else if (listFilters.residency === "SAN_ISIDRO" || listFilters.residency === "FUERA_SAN_ISIDRO") {
+        memberConstraints.push(where("residencyStatus", "==", listFilters.residency));
+      }
       const shouldCount = refreshCounts || counts.members === null || counts.subsidized === null || counts.salesToday === null;
-      const [membersSnap, subsidizedSnap, salesSnap, membersCountSnap, subsidizedCountSnap, salesCountSnap] = await Promise.all([
-        memberPageSize ? getDocs(pageQuery("members", current.members, memberPageSize)) : Promise.resolve(null),
-        subsidizedPageSize ? getDocs(pageQuery("subsidized_members", current.subsidized, subsidizedPageSize)) : Promise.resolve(null),
-        todaySales ? getDocs(todaySales) : Promise.resolve(null),
+      const countsPromise = Promise.all([
         shouldCount ? getCountFromServer(collection(db, "members")) : Promise.resolve(null),
         shouldCount ? getCountFromServer(collection(db, "subsidized_members")) : Promise.resolve(null),
         shouldCount ? getCountFromServer(query(collection(db, "sales"), where("dateKey", "==", todayKey()))) : Promise.resolve(null),
       ]);
-      const hydratedRows = await hydrateSources(membersSnap?.docs ?? [], subsidizedSnap?.docs ?? [], salesSnap?.docs ?? []);
-      const backfilled = await backfillSubsidizedMembers(hydratedRows);
-      const pageRows = backfilled.rows;
+
+      async function scanSource(source: keyof SourceCursors, targetSize: number) {
+        let sourceCursor = current[source];
+        let sourceHasMore = targetSize > 0;
+        let matchingRows: MemberRow[] = [];
+        let created = 0;
+        while (matchingRows.length < targetSize && sourceHasMore) {
+          const remaining = targetSize - matchingRows.length;
+          const profileHandledByServer = listFilters.profile === "COMPLETO";
+          const residencyHandledByServer = listFilters.profile !== "COMPLETO"
+            && (listFilters.residency === "SAN_ISIDRO" || listFilters.residency === "FUERA_SAN_ISIDRO");
+          const needsBasicMemberScan = Boolean(
+            listFilters.search.trim()
+            || listFilters.benefit === "LOTE"
+            || (listFilters.profile !== "TODAS" && !profileHandledByServer)
+            || (listFilters.residency !== "TODAS" && !residencyHandledByServer)
+          );
+          const canPrefilterMembers = source === "members"
+            && needsBasicMemberScan
+            && (listFilters.benefit === "TODOS" || listFilters.benefit === "LOTE");
+          const needsHydratedScan = source !== "members"
+            ? listFilters.profile !== "TODAS" || listFilters.residency !== "TODAS" || listFilters.benefit !== "TODOS" || Boolean(listFilters.search.trim())
+            : listFilters.benefit === "SUBVENCIONADO" || listFilters.benefit === "SIN_BENEFICIO";
+          const batchSize = source === "sales"
+            ? Math.max(1, remaining)
+            : canPrefilterMembers
+              ? Math.max(remaining, FAST_FILTER_SCAN_SIZE)
+              : needsHydratedScan
+                ? Math.max(remaining, FILTER_SCAN_SIZE)
+                : Math.max(1, remaining);
+          const snapshot = source === "sales"
+            ? await getDocs(query(
+              collection(db, "sales"),
+              where("dateKey", "==", todayKey()),
+              orderBy(documentId()),
+              ...(sourceCursor ? [startAfter(sourceCursor)] : []),
+              limit(batchSize),
+            ))
+            : await getDocs(pageQuery(
+              source === "members" ? "members" : "subsidized_members",
+              sourceCursor,
+              batchSize,
+              source === "members" ? memberConstraints : [],
+            ));
+          if (snapshot.empty) {
+            sourceHasMore = false;
+            break;
+          }
+          const snapshotEndCursor = snapshot.docs.at(-1)?.id ?? sourceCursor;
+          sourceCursor = snapshotEndCursor;
+          sourceHasMore = snapshot.size === batchSize;
+          const memberCandidates = canPrefilterMembers
+            ? snapshot.docs.filter((item) => memberDocumentMatchesBasic(item, listFilters))
+            : snapshot.docs;
+          const candidateOverflow = canPrefilterMembers && memberCandidates.length > remaining;
+          const documentsToHydrate = candidateOverflow ? memberCandidates.slice(0, remaining) : memberCandidates;
+          const hydrated = source === "members"
+            ? await hydrateSources(documentsToHydrate)
+            : source === "subsidized"
+              ? await hydrateSources([], snapshot.docs)
+              : await hydrateSources([], [], snapshot.docs);
+          const backfilled = await backfillSubsidizedMembers(hydrated);
+          created += backfilled.created;
+          const matchingBatch = backfilled.rows.filter((row) => rowMatchesListQuery(row, listFilters));
+          const accepted = matchingBatch.slice(0, remaining);
+          matchingRows = mergeRows(matchingRows, accepted);
+          if (source !== "sales" && (matchingBatch.length > accepted.length || candidateOverflow) && accepted.length) {
+            sourceCursor = accepted.at(-1)?.dni ?? snapshotEndCursor;
+            sourceHasMore = true;
+          }
+        }
+        return { rows: matchingRows.slice(0, targetSize), cursor: sourceCursor, hasMore: sourceHasMore, created };
+      }
+
+      const memberResult = await scanSource("members", memberPageSize);
+      const subsidizedResult = await scanSource("subsidized", subsidizedPageSize);
+      const salesResult = await scanSource("sales", salesPageSize);
+      const [membersCountSnap, subsidizedCountSnap, salesCountSnap] = await countsPromise;
+      const pageRows = mergeRows(mergeRows(memberResult.rows, subsidizedResult.rows), salesResult.rows);
+      const created = memberResult.created + subsidizedResult.created + salesResult.created;
       const merged = reset ? pageRows : mergeRows(rows, pageRows);
       const nextCursors = {
-        members: membersSnap?.docs.at(-1)?.id ?? current.members,
-        subsidized: subsidizedSnap?.docs.at(-1)?.id ?? current.subsidized,
-        sales: salesSnap?.docs.at(-1)?.id ?? current.sales,
+        members: memberResult.cursor,
+        subsidized: subsidizedResult.cursor,
+        sales: salesResult.cursor,
       };
       const nextCounts = shouldCount ? {
         members: (membersCountSnap?.data().count ?? counts.members) === null
           ? null
-          : Number(membersCountSnap?.data().count ?? counts.members) + backfilled.created,
+          : Number(membersCountSnap?.data().count ?? counts.members) + created,
         subsidized: subsidizedCountSnap?.data().count ?? counts.subsidized,
         salesToday: salesCountSnap?.data().count ?? counts.salesToday,
       } : {
         ...counts,
-        members: counts.members === null ? null : counts.members + backfilled.created,
+        members: counts.members === null ? null : counts.members + created,
       };
-      const nextHasMore = Boolean(
-        (memberPageSize && membersSnap?.size === memberPageSize)
-        || (subsidizedPageSize && subsidizedSnap?.size === subsidizedPageSize)
-        || (salesPageSize && salesSnap?.size === salesPageSize)
-      );
+      const nextHasMore = memberResult.hasMore || subsidizedResult.hasMore || salesResult.hasMore;
       if (requestId !== loadRequestRef.current) return;
-      commitCache(merged, nextCursors, nextHasMore, nextCounts, mode);
+      commitCache(merged, nextCursors, nextHasMore, nextCounts, mode, listFilters);
     } catch (loadError: any) {
       if (requestId === loadRequestRef.current) {
         setError(`No se pudo cargar el padrón: ${loadError?.message || String(loadError)}`);
@@ -513,12 +661,18 @@ export default function Socios() {
 
   function selectOriginFilter(next: OriginFilter, preserveBenefitFilter = false) {
     const target = next === originFilter && next !== "TODOS" ? "TODOS" : next;
+    const nextBenefit = preserveBenefitFilter ? benefitFilter : "TODOS";
     setOriginFilter(target);
-    if (!preserveBenefitFilter) setBenefitFilter("TODOS");
+    if (!preserveBenefitFilter) setBenefitFilter(nextBenefit);
     setSelectedDni(null);
     setRegistration(null);
     setNotice("");
-    void loadMembers(true, target);
+    void loadMembers(true, target, false, {
+      profile: profileFilter,
+      residency: residencyFilter,
+      benefit: nextBenefit,
+      search: globalSearchTerm,
+    });
   }
 
   function openRow(row: MemberRow) {
@@ -542,7 +696,6 @@ export default function Socios() {
       return;
     }
     if (search !== dni) setSearch(dni);
-    setGlobalSearchDnis([]);
     setGlobalSearchTerm("");
     const existing = rows.find((row) => row.dni === dni);
     if (existing) {
@@ -632,87 +785,21 @@ export default function Socios() {
   async function searchByName(requestedTerm?: string) {
     const term = normalizedNameSearch(requestedTerm ?? search);
     if (term.length < 2 || /^\d+$/.test(term)) {
-      setError("Ingresá al menos 2 letras del nombre o apellido.");
+      setError("Ingresá al menos 2 caracteres para buscar en toda la base.");
       return;
     }
-
-    const prefix = term.split(" ")[0];
-    const requestId = ++loadRequestRef.current;
-    setLoading(true);
-    setError("");
+    if (search !== term) setSearch(term);
+    setGlobalSearchTerm(term);
+    setSelectedDni(null);
+    setRegistration(null);
+    setNotice("Buscando coincidencias en toda la fuente seleccionada...");
+    await loadMembers(true, originFilter, false, {
+      profile: profileFilter,
+      residency: residencyFilter,
+      benefit: benefitFilter,
+      search: term,
+    });
     setNotice("");
-    try {
-      const prefixEnd = `${prefix}\uf8ff`;
-      const [lastNameSnap, firstNameSnap] = await Promise.all([
-        getDocs(query(
-          collection(db, "members"),
-          orderBy("lastName"),
-          startAt(prefix),
-          endAt(prefixEnd),
-          limit(PAGE_SIZE),
-        )),
-        getDocs(query(
-          collection(db, "members"),
-          orderBy("firstName"),
-          startAt(prefix),
-          endAt(prefixEnd),
-          limit(PAGE_SIZE),
-        )),
-      ]);
-      if (requestId !== loadRequestRef.current) return;
-
-      const documents = new Map<string, MemberDocument>();
-      [...lastNameSnap.docs, ...firstNameSnap.docs].forEach((snapshot) => documents.set(snapshot.id, snapshot));
-      if (!documents.size) {
-        const legacyNameSnap = await getDocs(query(
-          collection(db, "members"),
-          orderBy("name"),
-          startAt(prefix),
-          endAt(prefixEnd),
-          limit(PAGE_SIZE),
-        ));
-        if (requestId !== loadRequestRef.current) return;
-        legacyNameSnap.docs.forEach((snapshot) => documents.set(snapshot.id, snapshot));
-      }
-      if (!documents.size) {
-        setGlobalSearchDnis([]);
-        setGlobalSearchTerm(term);
-        setNotice(`No se encontraron socios cuyo nombre o apellido coincida con “${term}”.`);
-        return;
-      }
-
-      const hydrated = await hydrateSources(Array.from(documents.values()).slice(0, 30));
-      if (requestId !== loadRequestRef.current) return;
-      const searchTerms = term.toLocaleLowerCase("es").split(" ").filter(Boolean);
-      const ordered = hydrated
-        .filter((row) => {
-          const fullName = `${row.profile.firstName} ${row.profile.lastName}`.toLocaleLowerCase("es");
-          return searchTerms.every((searchTerm) => fullName.includes(searchTerm));
-        })
-        .sort((a, b) => displayName(a).localeCompare(displayName(b), "es"));
-      if (!ordered.length) {
-        setGlobalSearchDnis([]);
-        setGlobalSearchTerm(term);
-        setNotice(`No se encontraron socios cuyo nombre o apellido coincida con “${term}”.`);
-        return;
-      }
-      const foundDnis = ordered.map((row) => row.dni);
-      const foundSet = new Set(foundDnis);
-      const nextRows = [...ordered, ...rows.filter((row) => !foundSet.has(row.dni))];
-      commitCache(nextRows, cursors, hasMore, counts);
-      setGlobalSearchDnis(foundDnis);
-      setGlobalSearchTerm(term);
-      setSelectedDni(null);
-      setRegistration(null);
-      setNotice(`✅ Se buscaron coincidencias en toda la base y se encontraron ${foundDnis.length} socios.`);
-    } catch (searchError: any) {
-      if (requestId === loadRequestRef.current) {
-        setGlobalSearchDnis([]);
-        setError(`No se pudo buscar por nombre o apellido: ${searchError?.message || String(searchError)}`);
-      }
-    } finally {
-      if (requestId === loadRequestRef.current) setLoading(false);
-    }
   }
 
   function runGlobalSearch() {
@@ -726,9 +813,17 @@ export default function Socios() {
 
   function handleSearchChange(value: string) {
     setSearch(value);
-    setGlobalSearchDnis([]);
-    setGlobalSearchTerm("");
     if (dniSearchTimerRef.current !== null) window.clearTimeout(dniSearchTimerRef.current);
+    if (!value.trim()) {
+      setGlobalSearchTerm("");
+      void loadMembers(true, originFilter, false, {
+        profile: profileFilter,
+        residency: residencyFilter,
+        benefit: benefitFilter,
+        search: "",
+      });
+      return;
+    }
     const dni = normalizedSearchDni(value);
     if (PURE_DNI_RE.test(dni)) {
       dniSearchTimerRef.current = window.setTimeout(() => {
@@ -736,18 +831,39 @@ export default function Socios() {
       }, 600);
       return;
     }
-    const nameTerm = normalizedNameSearch(value);
-    if (nameTerm.length < 3 || /^\d+$/.test(nameTerm)) return;
-    dniSearchTimerRef.current = window.setTimeout(() => {
-      void searchByName(nameTerm);
-    }, 800);
   }
 
   function handleBenefitFilterChange(next: BenefitFilter) {
     setBenefitFilter(next);
-    if (next === "SUBVENCIONADO" && originFilter !== "SUBSIDIZED") {
-      selectOriginFilter("SUBSIDIZED", true);
-    }
+    setSelectedDni(null);
+    void loadMembers(true, originFilter, false, {
+      profile: profileFilter,
+      residency: residencyFilter,
+      benefit: next,
+      search: globalSearchTerm,
+    });
+  }
+
+  function handleProfileFilterChange(next: ProfileFilter) {
+    setProfileFilter(next);
+    setSelectedDni(null);
+    void loadMembers(true, originFilter, false, {
+      profile: next,
+      residency: residencyFilter,
+      benefit: benefitFilter,
+      search: globalSearchTerm,
+    });
+  }
+
+  function handleResidencyFilterChange(next: ResidencyFilter) {
+    setResidencyFilter(next);
+    setSelectedDni(null);
+    void loadMembers(true, originFilter, false, {
+      profile: profileFilter,
+      residency: next,
+      benefit: benefitFilter,
+      search: globalSearchTerm,
+    });
   }
 
   function startRegistration() {
@@ -904,17 +1020,14 @@ export default function Socios() {
   }
 
   const filteredRows = useMemo(() => {
-    const normalizedTerm = normalizedNameSearch(search);
+    const normalizedTerm = normalizedNameSearch(globalSearchTerm);
     const terms = normalizedTerm.toLocaleLowerCase("es").split(" ").filter(Boolean);
     const exactDni = normalizedSearchDni(search);
-    const globalResultSet = new Set(globalSearchDnis);
-    const hasActiveGlobalSearch = globalSearchTerm === normalizedTerm && globalResultSet.size > 0;
     return rows.filter((row) => {
       const activeAlert = isMemberAlertActive(row.alert, todayKey());
       const searchable = [row.dni, row.profile.firstName, row.profile.lastName, row.profile.birthDate, row.profile.address.street, row.profile.address.number, row.profile.address.locality, row.qrCodes.join(" "), activeAlert ? row.alert?.message : ""].join(" ").toLocaleLowerCase("es");
       if (PURE_DNI_RE.test(exactDni) && row.dni === exactDni) return true;
       if (terms.length && !terms.every((term) => searchable.includes(term))) return false;
-      if (hasActiveGlobalSearch && globalResultSet.has(row.dni)) return true;
       if (originFilter !== "TODOS" && !row.origins.includes(originFilter)) return false;
       if (profileFilter !== "TODAS" && row.profile.profileStatus !== profileFilter) return false;
       if (residencyFilter !== "TODAS" && row.profile.residencyStatus !== residencyFilter) return false;
@@ -923,7 +1036,7 @@ export default function Socios() {
       if (benefitFilter === "SIN_BENEFICIO" && (hasActiveSubsidy(row) || hasActiveBundle(row))) return false;
       return true;
     });
-  }, [rows, search, globalSearchDnis, globalSearchTerm, originFilter, profileFilter, residencyFilter, benefitFilter]);
+  }, [rows, search, globalSearchTerm, originFilter, profileFilter, residencyFilter, benefitFilter]);
 
   const selected = selectedDni ? rows.find((row) => row.dni === selectedDni) ?? null : null;
 
@@ -1090,7 +1203,7 @@ export default function Socios() {
   return (
     <div className="socios-page">
       <div className="socios-heading">
-        <div><h1>Socios</h1><p>Vista unificada de fichas maestras, subvencionados y ventas de hoy. Se consultan hasta {PAGE_SIZE} registros base por vez.</p></div>
+        <div><h1>Socios</h1><p>Vista unificada de fichas maestras, subvencionados y ventas de hoy. Se muestran páginas de hasta {PAGE_SIZE} coincidencias sobre toda la fuente seleccionada.</p></div>
         <div className="socios-actions">
           {canManageMembers && <button className="button outline" onClick={startRegistration} disabled={loading}>+ Registrar socio</button>}
           {canImportExcel && (
@@ -1126,11 +1239,11 @@ export default function Socios() {
             <input className="input" value={search} onChange={(event) => handleSearchChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); runGlobalSearch(); } }} placeholder="Nombre, apellido, domicilio o DNI" />
             <button className="button outline" onClick={runGlobalSearch} disabled={loading || (!PURE_DNI_RE.test(normalizedSearchDni(search)) && normalizedNameSearch(search).length < 2)}>Buscar en toda la base</button>
           </div></label>
-          <label><span>Ficha</span><select className="input" value={profileFilter} onChange={(event) => setProfileFilter(event.target.value as ProfileFilter)}><option value="TODAS">Todas</option><option value="COMPLETO">Completa</option><option value="INCOMPLETO">Incompleta</option></select></label>
-          <label><span>Residencia</span><select className="input" value={residencyFilter} onChange={(event) => setResidencyFilter(event.target.value as "TODAS" | ResidencyStatus)}><option value="TODAS">Todas</option><option value="SAN_ISIDRO">San Isidro</option><option value="FUERA_SAN_ISIDRO">Fuera de San Isidro</option><option value="SIN_VERIFICAR">Sin verificar</option></select></label>
+          <label><span>Ficha</span><select className="input" value={profileFilter} onChange={(event) => handleProfileFilterChange(event.target.value as ProfileFilter)}><option value="TODAS">Todas</option><option value="COMPLETO">Completa</option><option value="INCOMPLETO">Incompleta</option></select></label>
+          <label><span>Residencia</span><select className="input" value={residencyFilter} onChange={(event) => handleResidencyFilterChange(event.target.value as ResidencyFilter)}><option value="TODAS">Todas</option><option value="SAN_ISIDRO">San Isidro</option><option value="FUERA_SAN_ISIDRO">Fuera de San Isidro</option><option value="SIN_VERIFICAR">Sin verificar</option></select></label>
           <label><span>Beneficio</span><select className="input" value={benefitFilter} onChange={(event) => handleBenefitFilterChange(event.target.value as BenefitFilter)}><option value="TODOS">Todos</option><option value="SUBVENCIONADO">Subvencionado activo</option><option value="LOTE">Lote activo</option><option value="SIN_BENEFICIO">Sin beneficio activo</option></select></label>
         </div>
-        <div className="socios-filter-help">Los indicadores superiores consultan directamente la fuente elegida en páginas de {PAGE_SIZE}. DNI, nombre y apellido se buscan automáticamente en toda la base. Domicilio y demás datos se filtran sobre los registros cargados.</div>
+        <div className="socios-filter-help">Ficha, residencia, beneficio y búsqueda se aplican sobre toda la fuente seleccionada. Cada página reúne hasta {PAGE_SIZE} coincidencias reales; “Cargar {PAGE_SIZE} más” continúa desde la última coincidencia revisada.</div>
       </Card>
 
       {error && <div className="socios-message error">{error}</div>}
@@ -1164,7 +1277,7 @@ export default function Socios() {
 
       <div className="socios-layout">
         <Card title={`Listado (${filteredRows.length} visibles · ${rows.length} cargados)`} right={lastUpdated ? <span className="socios-updated">Actualizado {formatDate(lastUpdated, true)}</span> : undefined}>
-          {loading && rows.length === 0 ? <div className="socios-empty">Cargando los primeros {PAGE_SIZE} socios...</div> : filteredRows.length === 0 ? <div className="socios-empty">No hay socios cargados que coincidan con los filtros.</div> : (
+          {loading && rows.length === 0 ? <div className="socios-empty">Buscando hasta {PAGE_SIZE} coincidencias en toda la fuente...</div> : filteredRows.length === 0 ? <div className="socios-empty">No hay socios en la fuente seleccionada que coincidan con los filtros.</div> : (
             <div className="socios-table-wrap"><table className="table socios-table">
               <thead><tr><th>Socio</th><th>DNI</th><th>Origen</th><th>Residencia</th><th>Beneficios</th><th>Ficha</th><th></th></tr></thead>
               <tbody>{filteredRows.map((row) => {
@@ -1181,7 +1294,7 @@ export default function Socios() {
               })}</tbody>
             </table></div>
           )}
-          <div className="socios-pager"><span>Esta vista consulta hasta {PAGE_SIZE} registros por página y elimina DNIs duplicados.</span>{hasMore ? <button className="button outline" onClick={() => void loadMembers(false, originFilter)} disabled={loading}>{loading ? "Cargando..." : `Cargar ${PAGE_SIZE} más`}</button> : <span className="socios-end">Fin de la fuente</span>}</div>
+          <div className="socios-pager"><span>Cada página contiene hasta {PAGE_SIZE} socios que ya cumplen todos los filtros y elimina DNIs duplicados.</span>{hasMore ? <button className="button outline" onClick={() => void loadMembers(false, originFilter)} disabled={loading}>{loading ? "Buscando coincidencias..." : `Cargar ${PAGE_SIZE} más`}</button> : <span className="socios-end">Fin de las coincidencias</span>}</div>
         </Card>
         {registration && canManageMembers ? (
           <RegisterMemberForm
@@ -1405,7 +1518,7 @@ function MemberDetail({ row, onClose, onSave, onDelete, canEdit, canDelete, canR
     <section><h3>Beneficios</h3><div className="socios-detail-grid"><DetailItem label="Subvención" value={hasActiveSubsidy(row) ? "Activa" : row.subsidizedData ? "Inactiva o vencida" : "No registrada"} /><DetailItem label="Vencimiento subvención" value={formatDate(row.subsidizedData?.expiresAt)} /><DetailItem label="Retiros subvencionados" value={Number(row.subsidizedData?.totalWithdrawals ?? 0)} /><DetailItem label="Lote" value={hasActiveBundle(row) ? "Activo" : bundle ? "Agotado o vencido" : "No registrado"} /><DetailItem label="Viandas disponibles" value={Number(bundle?.remaining ?? 0)} /><DetailItem label="Vencimiento lote" value={formatDate(bundle?.expiresAt)} /></div></section>
     <section><h3>Alerta</h3>{activeAlert ? <div className={`socios-alert ${row.alert?.level === "IMPORTANTE" ? "important" : ""}`}><strong>{row.alert?.level === "IMPORTANTE" ? "Importante" : "Información"}</strong><p>{row.alert?.message}</p><span>Vigencia: {row.alert?.validUntil ? formatDateKey(row.alert.validUntil) : "sin vencimiento"}</span></div> : <div className="socios-muted-box">No tiene alertas activas.</div>}</section>
     <section><h3>Actividad registrada</h3>{detailsLoading ? <div className="socios-muted-box">Cargando actividad de este socio...</div> : activity ? <div className="socios-detail-grid"><DetailItem label="Compras totales" value={activity.total} /><DetailItem label="Primera compra" value={formatDateKey(activity.firstDate)} /><DetailItem label="Última compra" value={formatDateKey(activity.lastDate)} /><DetailItem label="Efectivo" value={activity.efectivo} /><DetailItem label="Mercado Pago" value={activity.mercadoPago} /><DetailItem label="Usos de lote" value={activity.lote} /><DetailItem label="Retiros subvencionados" value={activity.subsidized} /></div> : null}</section>
-    {canReadAdministrativePayments && <section><h3>Cobros administrativos</h3>{detailsLoading ? <div className="socios-muted-box">Cargando cobros...</div> : administrativePayments.length ? <div className="socios-payment-list">{administrativePayments.slice(0, 20).map((payment) => <div key={payment.id} className={payment.status === "VOID" ? "void" : ""}><div><strong>{administrativePaymentConcepts(payment)}</strong><span>{CENTER_LABELS[payment.centerId]} · Recibo {payment.receiptNumber}</span>{payment.items.map((item) => <span key={item.concept}>{administrativeItemPeriod(item)} · {formatMoney(item.amount)}</span>)}</div><div><strong>{formatMoney(Number(payment.totalAmount || 0))}</strong><span>{payment.paymentMethod === "MP" ? "Pago virtual" : "Efectivo"} · {formatDate(payment.createdAt, true)}</span>{payment.status === "VOID" && <small>Anulado: {payment.voidReason || "sin motivo informado"}</small>}</div></div>)}</div> : <div className="socios-muted-box">No tiene cobros administrativos registrados.</div>}</section>}
+    {canReadAdministrativePayments && <section><h3>Cuotas y Servicios</h3>{detailsLoading ? <div className="socios-muted-box">Cargando cuotas y servicios...</div> : administrativePayments.length ? <div className="socios-payment-list">{administrativePayments.slice(0, 20).map((payment) => <div key={payment.id} className={payment.status === "VOID" ? "void" : ""}><div><strong>{administrativePaymentConcepts(payment)}</strong><span>{CENTER_LABELS[payment.centerId]} · Recibo {payment.receiptNumber}{payment.pricingResidency ? ` · ${residencyLabel(payment.pricingResidency)}` : ""}</span>{payment.items.map((item) => <span key={item.concept}>{administrativeItemPeriod(item)} · {formatMoney(item.amount)}</span>)}</div><div><strong>{formatMoney(Number(payment.totalAmount || 0))}</strong><span>{payment.paymentMethod === "MP" ? "Pago virtual" : "Efectivo"} · {formatDate(payment.createdAt, true)}</span>{payment.status === "VOID" && <small>Anulado: {payment.voidReason || "sin motivo informado"}</small>}</div></div>)}</div> : <div className="socios-muted-box">No tiene cuotas ni servicios registrados.</div>}</section>}
     <section><h3>Carnets vinculados</h3>{row.qrCodes.length ? <div className="socios-code-list">{row.qrCodes.map((code) => <code key={code}>{code}</code>)}</div> : <div className="socios-muted-box">No tiene códigos QR antiguos vinculados.</div>}</section>
     <section><h3>Trazabilidad</h3><div className="socios-detail-grid"><DetailItem label="Alta" value={formatDate(row.memberData?.createdAt || row.subsidizedData?.createdAt, true)} /><DetailItem label="Creada por" value={row.memberData?.createdBy?.email || row.memberData?.createdBy?.name || "—"} /><DetailItem label="Última actualización" value={formatDate(row.memberData?.updatedAt, true)} /><DetailItem label="Actualizada por" value={row.memberData?.updatedBy?.email || row.memberData?.updatedBy?.name || "—"} /></div>{audit.length > 0 && <div className="socios-audit-list">{audit.slice(0, 8).map((entry) => <div key={entry.id}><strong>{entry.action === "CREATE" ? "Alta" : entry.action === "UPDATE" ? "Edición" : entry.action === "IMPORT" ? "Importación Excel" : "Eliminación"}</strong><span>{entry.actor?.email || entry.actor?.name || "Usuario sin identificar"} · {formatDate(entry.createdAt, true)}</span></div>)}</div>}</section>
     {canDelete && row.existsInMembers && <section className="socios-danger-zone"><h3>Eliminar del padrón</h3><p>Se conservarán las ventas históricas. La eliminación quedará registrada con tu usuario.</p><button className="button danger" onClick={() => void remove()} disabled={deleting}>{deleting ? "Eliminando..." : `Eliminar socio ${row.dni}`}</button></section>}

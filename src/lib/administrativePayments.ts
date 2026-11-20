@@ -11,6 +11,7 @@ import {
 import type { DocumentData, Timestamp } from "firebase/firestore";
 import { db } from "../firebase";
 import type { CenterId } from "./centers";
+import type { ResidencyStatus } from "./members";
 
 export type AdministrativeConcept =
   | "BONO_CONTRIBUCION"
@@ -55,6 +56,7 @@ export type AdministrativePayment = {
     firstName: string;
     lastName: string;
   };
+  pricingResidency: ResidencyStatus;
   centerId: CenterId;
   closureId: string;
   items: AdministrativePaymentItem[];
@@ -101,6 +103,20 @@ export function poolDayGroupLabel(group: PoolDayGroup) {
     : "Lunes, miércoles, viernes y domingo";
 }
 
+export function administrativeMonthLabel(value: string) {
+  const monthKey = value.slice(0, 7);
+  const match = monthKey.match(/^(\d{4})-(\d{2})$/);
+  if (!match) return value;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1));
+  const month = new Intl.DateTimeFormat("es-AR", { month: "long", timeZone: "UTC" }).format(date);
+  return `${month.charAt(0).toLocaleUpperCase("es-AR")}${month.slice(1)}/${match[1].slice(2)}`;
+}
+
+function administrativeDateLabel(value: string) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : value;
+}
+
 export function administrativeItemPeriod(item: AdministrativePaymentItem) {
   if (item.concept === "PILETA" && item.pool) {
     const selectedMonth = item.pool.month ?? "Mes sin especificar";
@@ -111,15 +127,20 @@ export function administrativeItemPeriod(item: AdministrativePaymentItem) {
   }
   if (item.concept === "LOCKER" && item.lockerNumber) {
     const dates = item.periodStart && item.periodEnd
-      ? ` · ${item.periodStart} a ${item.periodEnd}`
+      ? ` · ${administrativeMonthLabel(item.periodStart)} a ${administrativeMonthLabel(item.periodEnd)}`
       : "";
     return `Locker ${item.lockerNumber}${dates}`;
   }
   if (item.concept === "INVITADO" && item.guest) {
     const dni = item.guest.dni ? ` · DNI ${item.guest.dni}` : "";
-    return `${item.guest.name}${dni} · ${item.guest.visitDate}`;
+    return `${item.guest.name}${dni} · ${administrativeDateLabel(item.guest.visitDate)}`;
   }
-  if (item.periodStart && item.periodEnd) return `${item.detail} · ${item.periodStart} a ${item.periodEnd}`;
+  if (item.periodStart && item.periodEnd) {
+    const period = item.periodStart.slice(0, 7) === item.periodEnd.slice(0, 7)
+      ? administrativeMonthLabel(item.periodStart)
+      : `${administrativeMonthLabel(item.periodStart)} a ${administrativeMonthLabel(item.periodEnd)}`;
+    return `${item.detail} · ${period}`;
+  }
   return item.detail;
 }
 
