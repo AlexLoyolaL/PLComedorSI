@@ -103,6 +103,13 @@ export function poolDayGroupLabel(group: PoolDayGroup) {
     : "Lunes, miércoles, viernes y domingo";
 }
 
+export function administrativeContributionTypeLabel(detail: string) {
+  if (detail === "CUOTA") return "Cuota";
+  if (detail === "INSCRIPCION") return "Inscripción";
+  if (detail === "REINCORPORACION") return "Reincorporación";
+  return detail;
+}
+
 export function administrativeMonthLabel(value: string) {
   const monthKey = value.slice(0, 7);
   const match = monthKey.match(/^(\d{4})-(\d{2})$/);
@@ -118,6 +125,16 @@ function administrativeDateLabel(value: string) {
 }
 
 export function administrativeItemPeriod(item: AdministrativePaymentItem) {
+  if (item.concept === "BONO_CONTRIBUCION") {
+    const type = administrativeContributionTypeLabel(item.detail);
+    if (item.periodStart && item.periodEnd) {
+      const period = item.periodStart.slice(0, 7) === item.periodEnd.slice(0, 7)
+        ? administrativeMonthLabel(item.periodStart)
+        : `${administrativeMonthLabel(item.periodStart)} a ${administrativeMonthLabel(item.periodEnd)}`;
+      return `${type} · ${period}`;
+    }
+    return type;
+  }
   if (item.concept === "PILETA" && item.pool) {
     const selectedMonth = item.pool.month ?? "Mes sin especificar";
     const coverage = item.pool.seasonType === "TEMPORADA_COMPLETA"
@@ -145,7 +162,9 @@ export function administrativeItemPeriod(item: AdministrativePaymentItem) {
 }
 
 export function administrativePaymentConcepts(payment: AdministrativePayment) {
-  return payment.items.map((item) => administrativeConceptLabel(item.concept)).join(" + ");
+  return payment.items.map((item) => item.concept === "BONO_CONTRIBUCION"
+    ? `${administrativeConceptLabel(item.concept)} (${administrativeContributionTypeLabel(item.detail)})`
+    : administrativeConceptLabel(item.concept)).join(" + ");
 }
 
 export async function createAdministrativePayment(input: NewAdministrativePayment) {

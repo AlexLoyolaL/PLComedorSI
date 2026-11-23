@@ -13,6 +13,7 @@ import {
 import { db } from "../firebase";
 import { resolveMemberDni } from "../lib/memberId";
 import {
+  administrativeContributionTypeLabel,
   administrativeItemPeriod,
   administrativeTodayKey,
   createAdministrativePayment,
@@ -53,10 +54,12 @@ type MemberOption = {
   residencyStatus: ResidencyStatus;
 };
 
+type ContributionType = "CUOTA" | "INSCRIPCION" | "REINCORPORACION";
+
 type FormState = {
   enabled: Record<AdministrativeConcept, boolean>;
-  contributionType: "CUOTA" | "INSCRIPCION" | "REINCORPORACION";
-  contributionAmount: string;
+  contributionTypes: Record<ContributionType, boolean>;
+  contributionAmounts: Record<ContributionType, string>;
   contributionStart: string;
   contributionEnd: string;
   lockerAmount: string;
@@ -83,6 +86,13 @@ type FormState = {
 
 const PURE_DNI_RE = /^\d{7,8}$/;
 const POOL_MONTHS: PoolMonth[] = ["DICIEMBRE", "ENERO", "FEBRERO", "MARZO"];
+const CONTRIBUTION_TYPES: ContributionType[] = ["CUOTA", "INSCRIPCION", "REINCORPORACION"];
+
+function contributionTypeLabel(type: ContributionType, centerId: CenterId) {
+  if (type === "CUOTA") return centerId === "ANEXO_19" ? "Cuota social" : "Cuota mensual";
+  if (type === "INSCRIPCION") return "Inscripción";
+  return "Reincorporación";
+}
 
 function currentPoolSeason() {
   const now = new Date();
@@ -102,8 +112,8 @@ function blankForm(): FormState {
       ACTIVIDAD_1_SEMANAL: false,
       ACTIVIDAD_2_SEMANAL: false,
     },
-    contributionType: "CUOTA",
-    contributionAmount: "",
+    contributionTypes: { CUOTA: true, INSCRIPCION: false, REINCORPORACION: false },
+    contributionAmounts: { CUOTA: "", INSCRIPCION: "", REINCORPORACION: "" },
     contributionStart: currentMonth,
     contributionEnd: currentMonth,
     lockerAmount: "",
@@ -242,17 +252,17 @@ function applyCatalogPrices(
     residencyStatus,
   });
   const currentMonth = administrativeTodayKey().slice(0, 7);
-  const contribution = form.contributionType === "CUOTA"
-    ? administrativeRangePrice({
-      centerId,
-      concept: "BONO_CONTRIBUCION",
-      detail: "CUOTA",
-      paymentMethod,
-      from: form.contributionStart,
-      to: form.contributionEnd,
-      residencyStatus,
-    })
-    : quote("BONO_CONTRIBUCION", form.contributionType, currentMonth);
+  const contributionQuota = administrativeRangePrice({
+    centerId,
+    concept: "BONO_CONTRIBUCION",
+    detail: "CUOTA",
+    paymentMethod,
+    from: form.contributionStart,
+    to: form.contributionEnd,
+    residencyStatus,
+  });
+  const contributionRegistration = quote("BONO_CONTRIBUCION", "INSCRIPCION", currentMonth);
+  const contributionReinstatement = quote("BONO_CONTRIBUCION", "REINCORPORACION", currentMonth);
   const locker = quote("LOCKER", "ALQUILER", form.lockerStart || currentMonth);
   const guest = quote("INVITADO", "INGRESO", form.guestVisitDate.slice(0, 7) || currentMonth);
   const registration = quote("INSCRIPCION_ACTIVIDADES", "INSCRIPCION", currentMonth);
@@ -262,9 +272,13 @@ function applyCatalogPrices(
   return {
     ...form,
     paymentMethod,
-    contributionAmount: contribution.status === "PRICED" && contribution.amount != null
-      ? String(contribution.amount)
-      : form.contributionAmount,
+    contributionAmounts: {
+      CUOTA: contributionQuota.status === "PRICED" && contributionQuota.amount != null
+        ? String(contributionQuota.amount)
+        : form.contributionAmounts.CUOTA,
+      INSCRIPCION: quoteAmount(contributionRegistration, form.contributionAmounts.INSCRIPCION),
+      REINCORPORACION: quoteAmount(contributionReinstatement, form.contributionAmounts.REINCORPORACION),
+    },
     lockerAmount: quoteAmount(locker, form.lockerAmount),
     guestAmount: quoteAmount(guest, form.guestAmount),
     poolAmount: quoteAmount(pool, form.poolAmount),
@@ -339,8 +353,8 @@ export default function Cobros() {
   const pricingResidency = selectedMember?.residencyStatus ?? "SIN_VERIFICAR";
   const pricingTrigger = [
     ...Object.entries(form.enabled).map(([concept, enabled]) => `${concept}:${enabled}`),
+    ...Object.entries(form.contributionTypes).map(([type, enabled]) => `${type}:${enabled}`),
     form.paymentMethod,
-    form.contributionType,
     form.contributionStart,
     form.contributionEnd,
     form.lockerStart,
@@ -355,7 +369,9 @@ export default function Cobros() {
     void pricingTrigger;
     setForm((current) => {
       const priced = applyCatalogPrices(current, centerId, current.paymentMethod, pricingResidency);
-      const unchanged = priced.contributionAmount === current.contributionAmount
+      const unchanged = priced.contributionAmounts.CUOTA === current.contributionAmounts.CUOTA
+        && priced.contributionAmounts.INSCRIPCION === current.contributionAmounts.INSCRIPCION
+        && priced.contributionAmounts.REINCORPORACION === current.contributionAmounts.REINCORPORACION
         && priced.lockerAmount === current.lockerAmount
         && priced.guestAmount === current.guestAmount
         && priced.poolAmount === current.poolAmount
@@ -373,7 +389,9 @@ export default function Cobros() {
     mp: activeToday.filter((payment) => payment.paymentMethod === "MP").reduce((sum, payment) => sum + Number(payment.totalAmount || 0), 0),
   }), [activeToday]);
   const formTotal = useMemo(() => (
-    (form.enabled.BONO_CONTRIBUCION ? numericAmount(form.contributionAmount) : 0)
+    (form.enabled.BONO_CONTRIBUCION
+      ? CONTRIBUTION_TYPES.reduce((sum, type) => sum + (form.contributionTypes[type] ? numericAmount(form.contributionAmounts[type]) : 0), 0)
+      : 0)
     + (form.enabled.LOCKER ? numericAmount(form.lockerAmount) : 0)
     + (form.enabled.INVITADO ? numericAmount(form.guestAmount) : 0)
     + (form.enabled.PILETA ? numericAmount(form.poolAmount) : 0)
@@ -462,6 +480,14 @@ export default function Cobros() {
     setMessage("");
   }
 
+  function toggleContributionType(type: ContributionType) {
+    setForm((current) => ({
+      ...current,
+      contributionTypes: { ...current.contributionTypes, [type]: !current.contributionTypes[type] },
+    }));
+    setMessage("");
+  }
+
   function buildItems() {
     const items: AdministrativePaymentItem[] = [];
     if (!availableConcepts.some((concept) => form.enabled[concept])) {
@@ -469,23 +495,30 @@ export default function Cobros() {
     }
 
     if (form.enabled.BONO_CONTRIBUCION) {
-      if (form.contributionType === "CUOTA" && (!form.contributionStart || !form.contributionEnd)) {
+      const availableContributionTypes = centerId === "PUERTO_LIBRE" ? CONTRIBUTION_TYPES : (["CUOTA"] as ContributionType[]);
+      const selectedContributionTypes = availableContributionTypes.filter((type) => form.contributionTypes[type]);
+      if (!selectedContributionTypes.length) {
+        throw new Error("Seleccioná al menos un tipo dentro de Bono contribución.");
+      }
+      if (form.contributionTypes.CUOTA && (!form.contributionStart || !form.contributionEnd)) {
         throw new Error("Indicá desde y hasta cuándo cubre el bono contribución.");
       }
-      const contributionStart = form.contributionType === "CUOTA" ? monthlyPeriod(form.contributionStart) : null;
-      const contributionEnd = form.contributionType === "CUOTA" ? monthlyPeriod(form.contributionEnd) : null;
-      if (form.contributionType === "CUOTA" && (!contributionStart || !contributionEnd || form.contributionStart > form.contributionEnd)) {
+      const contributionStart = form.contributionTypes.CUOTA ? monthlyPeriod(form.contributionStart) : null;
+      const contributionEnd = form.contributionTypes.CUOTA ? monthlyPeriod(form.contributionEnd) : null;
+      if (form.contributionTypes.CUOTA && (!contributionStart || !contributionEnd || form.contributionStart > form.contributionEnd)) {
         throw new Error("El período del bono contribución debe tener meses válidos y Desde no puede ser posterior a Hasta.");
       }
-      items.push({
-        concept: "BONO_CONTRIBUCION",
-        amount: requiredAmount(form.contributionAmount, "bono contribución"),
-        detail: form.contributionType,
-        periodStart: contributionStart?.start ?? null,
-        periodEnd: contributionEnd?.end ?? null,
-        lockerNumber: null,
-        guest: null,
-        pool: null,
+      selectedContributionTypes.forEach((type) => {
+        items.push({
+          concept: "BONO_CONTRIBUCION",
+          amount: requiredAmount(form.contributionAmounts[type], contributionTypeLabel(type, centerId).toLocaleLowerCase("es-AR")),
+          detail: type,
+          periodStart: type === "CUOTA" ? contributionStart?.start ?? null : null,
+          periodEnd: type === "CUOTA" ? contributionEnd?.end ?? null : null,
+          lockerNumber: null,
+          guest: null,
+          pool: null,
+        });
       });
     }
 
@@ -693,14 +726,16 @@ export default function Cobros() {
 
             {form.enabled.BONO_CONTRIBUCION && <section className="cobros-concept-panel">
               <h3>{centerId === "ANEXO_19" ? "Cuota social" : "Bono contribución"}</h3>
-              <div className="cobros-two-cols">
-                <label><span>Tipo</span><select className="input" value={form.contributionType} onChange={(event) => {
-                  const contributionType = event.target.value as FormState["contributionType"];
-                  setForm((current) => ({ ...current, contributionType }));
-                }}><option value="CUOTA">{centerId === "ANEXO_19" ? "Cuota social" : "Bono contribución"}</option>{centerId === "PUERTO_LIBRE" && <><option value="INSCRIPCION">Inscripción</option><option value="REINCORPORACION">Reincorporación</option></>}</select></label>
-                <label><span>Importe</span><input type="number" min="0" step="0.01" className="input" value={form.contributionAmount} onChange={(event) => setForm({ ...form, contributionAmount: event.target.value })} /></label>
+              <div className="cobros-rate-note">Tipos: seleccioná una o varias opciones para incluirlas en el mismo comprobante.</div>
+              <div className="cobros-concept-options">
+                {(centerId === "PUERTO_LIBRE" ? CONTRIBUTION_TYPES : (["CUOTA"] as ContributionType[])).map((type) => <label key={type} className={`cobros-concept-check ${form.contributionTypes[type] ? "active" : ""}`}>
+                  <input type="checkbox" checked={form.contributionTypes[type]} onChange={() => toggleContributionType(type)} />
+                  <span>{contributionTypeLabel(type, centerId)}</span>
+                </label>)}
               </div>
-              {form.contributionType === "CUOTA" && <div className="cobros-two-cols"><label><span>Desde (mes/año)</span><input type="month" className="input" value={form.contributionStart} onChange={(event) => setForm({ ...form, contributionStart: event.target.value })} /></label><label><span>Hasta (mes/año)</span><input type="month" className="input" value={form.contributionEnd} onChange={(event) => setForm({ ...form, contributionEnd: event.target.value })} /></label></div>}
+              {form.contributionTypes.CUOTA && <div className="cobros-two-cols"><label><span>{contributionTypeLabel("CUOTA", centerId)} - importe</span><input type="number" min="0" step="0.01" className="input" value={form.contributionAmounts.CUOTA} onChange={(event) => setForm((current) => ({ ...current, contributionAmounts: { ...current.contributionAmounts, CUOTA: event.target.value } }))} /></label><label><span>Desde (mes/año)</span><input type="month" className="input" value={form.contributionStart} onChange={(event) => setForm({ ...form, contributionStart: event.target.value })} /></label><label><span>Hasta (mes/año)</span><input type="month" className="input" value={form.contributionEnd} onChange={(event) => setForm({ ...form, contributionEnd: event.target.value })} /></label></div>}
+              {form.contributionTypes.INSCRIPCION && centerId === "PUERTO_LIBRE" && <label><span>Inscripción - importe</span><input type="number" min="0" step="0.01" className="input" value={form.contributionAmounts.INSCRIPCION} onChange={(event) => setForm((current) => ({ ...current, contributionAmounts: { ...current.contributionAmounts, INSCRIPCION: event.target.value } }))} /></label>}
+              {form.contributionTypes.REINCORPORACION && centerId === "PUERTO_LIBRE" && <label><span>Reincorporación - importe</span><input type="number" min="0" step="0.01" className="input" value={form.contributionAmounts.REINCORPORACION} onChange={(event) => setForm((current) => ({ ...current, contributionAmounts: { ...current.contributionAmounts, REINCORPORACION: event.target.value } }))} /></label>}
             </section>}
 
             {form.enabled.LOCKER && <section className="cobros-concept-panel">
@@ -771,8 +806,8 @@ function PaymentTable({ title, payments, empty, canVoid, onVoid }: {
       <thead><tr><th>Fecha</th><th>Conceptos</th><th>Detalle</th><th>Recibo</th><th>Medio</th><th>Total</th><th>Estado</th><th></th></tr></thead>
       <tbody>{payments.map((payment) => <tr key={payment.id} className={payment.status === "VOID" ? "cobros-void" : ""}>
         <td>{dateTime(payment.createdAt)}</td>
-        <td><div className="cobros-item-concepts">{payment.items.map((item) => <span className="socios-pill info" key={item.concept}>{centerConceptLabel(payment.centerId, item.concept)}</span>)}</div></td>
-        <td><div className="cobros-item-details">{payment.items.map((item) => <div key={item.concept}><span>{administrativeItemPeriod(item)}</span><strong>{money(item.amount)}</strong></div>)}</div></td>
+        <td><div className="cobros-item-concepts">{payment.items.map((item, index) => <span className="socios-pill info" key={`${item.concept}-${item.detail}-${index}`}>{centerConceptLabel(payment.centerId, item.concept)}{item.concept === "BONO_CONTRIBUCION" ? ` · ${administrativeContributionTypeLabel(item.detail)}` : ""}</span>)}</div></td>
+        <td><div className="cobros-item-details">{payment.items.map((item, index) => <div key={`${item.concept}-${item.detail}-${index}`}><span>{administrativeItemPeriod(item)}</span><strong>{money(item.amount)}</strong></div>)}</div></td>
         <td><div>{payment.receiptNumber}</div>{payment.pricingResidency && <small>{residencyLabel(payment.pricingResidency)}</small>}</td>
         <td>{payment.paymentMethod === "MP" ? "Pago virtual" : "Efectivo"}</td>
         <td>{money(Number(payment.totalAmount || 0))}</td>

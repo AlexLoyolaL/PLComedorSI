@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AdministrativePayment } from "../lib/administrativePayments";
-import { administrativeTodayKey, listenAdministrativePayments } from "../lib/administrativePayments";
+import { administrativeContributionTypeLabel, administrativeTodayKey, listenAdministrativePayments } from "../lib/administrativePayments";
 import {
   createAdministrativeClosure,
   listenAdministrativeClosure,
@@ -66,14 +66,15 @@ export default function CobrosRendicion({ centerId, canClose }: { centerId: Cent
   }, [activePayments]);
 
   const byConcept = useMemo(() => {
-    const result: Record<string, { count: number; cash: number; virtual: number; total: number }> = {};
+    const result: Record<string, { concept: AdministrativePayment["items"][number]["concept"]; detail: string; count: number; cash: number; virtual: number; total: number }> = {};
     activePayments.forEach((payment) => payment.items.forEach((item) => {
-      const current = result[item.concept] ?? { count: 0, cash: 0, virtual: 0, total: 0 };
+      const summaryKey = item.concept === "BONO_CONTRIBUCION" ? `${item.concept}:${item.detail}` : item.concept;
+      const current = result[summaryKey] ?? { concept: item.concept, detail: item.detail, count: 0, cash: 0, virtual: 0, total: 0 };
       current.count += 1;
       current.total += item.amount;
       if (payment.paymentMethod === "EFECTIVO") current.cash += item.amount;
       else current.virtual += item.amount;
-      result[item.concept] = current;
+      result[summaryKey] = current;
     }));
     return result;
   }, [activePayments]);
@@ -135,7 +136,7 @@ export default function CobrosRendicion({ centerId, canClose }: { centerId: Cent
     <Card title="Detalle por concepto">
       {Object.keys(byConcept).length === 0 ? <div className="socios-muted-box">No hay cuotas ni servicios vigentes para esta fecha y sede.</div> : <div className="cobros-table-wrap"><table className="table">
         <thead><tr><th>Concepto</th><th>Operaciones</th><th>Efectivo</th><th>Pago virtual</th><th>Total</th></tr></thead>
-        <tbody>{Object.entries(byConcept).map(([concept, value]) => <tr key={concept}><td>{centerConceptLabel(centerId, concept as AdministrativePayment["items"][number]["concept"])}</td><td>{value.count}</td><td>{money(value.cash)}</td><td>{money(value.virtual)}</td><td><strong>{money(value.total)}</strong></td></tr>)}</tbody>
+        <tbody>{Object.entries(byConcept).map(([summaryKey, value]) => <tr key={summaryKey}><td>{centerConceptLabel(centerId, value.concept)}{value.concept === "BONO_CONTRIBUCION" ? ` · ${administrativeContributionTypeLabel(value.detail)}` : ""}</td><td>{value.count}</td><td>{money(value.cash)}</td><td>{money(value.virtual)}</td><td><strong>{money(value.total)}</strong></td></tr>)}</tbody>
       </table></div>}
     </Card>
 
