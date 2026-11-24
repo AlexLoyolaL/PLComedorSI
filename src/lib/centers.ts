@@ -52,7 +52,7 @@ const PRICE_PERIODS: PricePeriod[] = [
     prices: {
       "PUERTO_LIBRE:BONO_CONTRIBUCION:CUOTA": { cash: 2500, virtual: 2500 },
       "PUERTO_LIBRE:BONO_CONTRIBUCION:INSCRIPCION": { cash: 2500, virtual: 2500 },
-      "PUERTO_LIBRE:BONO_CONTRIBUCION:REINCORPORACION": { cash: 12500, virtual: 12500 },
+      "PUERTO_LIBRE:BONO_CONTRIBUCION:REINCORPORACION": { cash: 10000, virtual: 10000 },
       "PUERTO_LIBRE:LOCKER:ALQUILER": { cash: 7000, virtual: 7000 },
       "PUERTO_LIBRE:INVITADO:INGRESO": { cash: 10000, virtual: 10000 },
       "ANEXO_19:BONO_CONTRIBUCION:CUOTA": { cash: 3000, virtual: 2500 },
@@ -70,7 +70,7 @@ const PRICE_PERIODS: PricePeriod[] = [
     prices: {
       "PUERTO_LIBRE:BONO_CONTRIBUCION:CUOTA": { cash: 3000, virtual: 3000, outside: 7000 },
       "PUERTO_LIBRE:BONO_CONTRIBUCION:INSCRIPCION": { cash: 3000, virtual: 3000, outside: 7000 },
-      "PUERTO_LIBRE:BONO_CONTRIBUCION:REINCORPORACION": { cash: 15000, virtual: 15000, outside: 35000 },
+      "PUERTO_LIBRE:BONO_CONTRIBUCION:REINCORPORACION": { cash: 10000, virtual: 10000, outside: 35000 },
       "PUERTO_LIBRE:LOCKER:ALQUILER": { cash: 9000, virtual: 9000, outside: 20000 },
       "PUERTO_LIBRE:INVITADO:INGRESO": { cash: 15000, virtual: 15000, outside: "NOT_AVAILABLE" },
       "PUERTO_LIBRE:PILETA:TEMPORADA_COMPLETA": { cash: 30000, virtual: 30000, outside: 60000 },

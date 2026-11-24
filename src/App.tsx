@@ -118,12 +118,6 @@ export default function App() {
           </button>
         )}
 
-        {canSeeCobros && (
-          <button className={`tab ${tab === "cobros" ? "active" : ""}`} onClick={() => setTab("cobros")}>
-            Cuotas y Servicios
-          </button>
-        )}
-
         {canSeeCocina && (
           <button className={`tab ${tab === "cocina" ? "active" : ""}`} onClick={() => setTab("cocina")}>
             Cocina
@@ -176,6 +170,12 @@ export default function App() {
         {!isCobrador && <button className={`tab ${tab === "socios" ? "active" : ""}`} onClick={() => setTab("socios")}>
           👥 Socios
         </button>}
+
+        {canSeeCobros && (
+          <button className={`tab ${tab === "cobros" ? "active" : ""}`} onClick={() => setTab("cobros")}>
+            🧾 Cuotas y Servicios
+          </button>
+        )}
 
         <div className="fill" />
         <span className="badge">{user.email}</span>
